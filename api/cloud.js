@@ -156,36 +156,63 @@ async function fetchCollectApiMerged() {
     'content-type': 'application/json',
   };
 
-  async function fetchCityFuel(city, fuelType) {
-    const url = `${base.replace(/\/$/, '')}/${fuelType}?city=${encodeURIComponent(city)}`;
+  // Önce parametresiz dene (tüm şehirler)
+  async function fetchAllCities(fuelType) {
+    const url = `${base.replace(/\/$/, '')}/${fuelType}`;
     try {
       const response = await fetch(url, { headers });
       if (!response.ok) return null;
       const json = await response.json().catch(() => null);
-      const arr = extractArray(json);
-      if (!arr || arr.length === 0) return null;
-      // İlk sonuçtan fiyatı al
-      return extractPrice(arr[0]);
+      return extractArray(json);
     } catch {
       return null;
     }
   }
 
+  // Tüm yakıt tiplerini paralel çek
+  const [gasolineData, dieselData, lpgData] = await Promise.all([
+    fetchAllCities('turkeyGasoline'),
+    fetchAllCities('turkeyDiesel'),
+    fetchAllCities('turkeyLpg'),
+  ]);
+
   const pricesByCity = {};
-  
-  // Her şehir için 3 yakıt tipini paralel çek
-  await Promise.all(TURKEY_CITIES.map(async (city) => {
-    const [benzin, motorin, lpg] = await Promise.all([
-      fetchCityFuel(city, 'turkeyGasoline'),
-      fetchCityFuel(city, 'turkeyDiesel'),
-      fetchCityFuel(city, 'turkeyLpg'),
-    ]);
-    
-    if (benzin != null && motorin != null && lpg != null) {
-      const cityKey = normalizeCityKey(city);
-      pricesByCity[cityKey] = { benzin, motorin, lpg };
+
+  // Benzin verilerini işle
+  if (gasolineData) {
+    for (const item of gasolineData) {
+      const cityName = extractCity(item);
+      if (!cityName) continue;
+      const cityKey = normalizeCityKey(cityName);
+      if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
+      const price = extractPrice(item);
+      if (price != null) pricesByCity[cityKey].benzin = price;
     }
-  }));
+  }
+
+  // Motorin verilerini işle
+  if (dieselData) {
+    for (const item of dieselData) {
+      const cityName = extractCity(item);
+      if (!cityName) continue;
+      const cityKey = normalizeCityKey(cityName);
+      if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
+      const price = extractPrice(item);
+      if (price != null) pricesByCity[cityKey].motorin = price;
+    }
+  }
+
+  // LPG verilerini işle
+  if (lpgData) {
+    for (const item of lpgData) {
+      const cityName = extractCity(item);
+      if (!cityName) continue;
+      const cityKey = normalizeCityKey(cityName);
+      if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
+      const price = extractPrice(item);
+      if (price != null) pricesByCity[cityKey].lpg = price;
+    }
+  }
 
   if (Object.keys(pricesByCity).length === 0) return null;
   return { prices: pricesByCity, lastUpdate: new Date().toISOString() };
@@ -237,7 +264,6 @@ async function handleSource(req, res) {
   }
 
   const type = req.query && req.query.type ? String(req.query.type) : 'gasoline';
-  const city = req.query && req.query.city ? String(req.query.city) : 'istanbul';
   const limitRaw = req.query && req.query.limit ? String(req.query.limit) : '10';
   const limit = Math.max(1, Math.min(50, Number.parseInt(limitRaw, 10) || 10));
 
@@ -248,7 +274,8 @@ async function handleSource(req, res) {
   }
 
   const base = process.env.COLLECTAPI_BASE_URL || 'https://api.collectapi.com/gasPrice';
-  const url = `${base.replace(/\/$/, '')}/${pathSuffix}?city=${encodeURIComponent(city)}`;
+  // Parametresiz dene - API tüm şehirleri döndürebilir
+  const url = `${base.replace(/\/$/, '')}/${pathSuffix}`;
 
   const response = await fetch(url, {
     headers: {
