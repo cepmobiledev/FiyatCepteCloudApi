@@ -133,6 +133,19 @@ function requireToken(req, res) {
 }
 
 // ---------------- CollectAPI fetch & merge ----------------
+const TURKEY_CITIES = [
+  'Adana', 'Adıyaman', 'Afyonkarahisar', 'Ağrı', 'Amasya', 'Ankara', 'Antalya', 'Artvin',
+  'Aydın', 'Balıkesir', 'Bilecik', 'Bingöl', 'Bitlis', 'Bolu', 'Burdur', 'Bursa',
+  'Çanakkale', 'Çankırı', 'Çorum', 'Denizli', 'Diyarbakır', 'Edirne', 'Elazığ', 'Erzincan',
+  'Erzurum', 'Eskişehir', 'Gaziantep', 'Giresun', 'Gümüşhane', 'Hakkari', 'Hatay', 'Isparta',
+  'Mersin', 'İstanbul', 'İzmir', 'Kars', 'Kastamonu', 'Kayseri', 'Kırklareli', 'Kırşehir',
+  'Kocaeli', 'Konya', 'Kütahya', 'Malatya', 'Manisa', 'Kahramanmaraş', 'Mardin', 'Muğla',
+  'Muş', 'Nevşehir', 'Niğde', 'Ordu', 'Rize', 'Sakarya', 'Samsun', 'Siirt', 'Sinop',
+  'Sivas', 'Tekirdağ', 'Tokat', 'Trabzon', 'Tunceli', 'Şanlıurfa', 'Uşak', 'Van',
+  'Yozgat', 'Zonguldak', 'Aksaray', 'Bayburt', 'Karaman', 'Kırıkkale', 'Batman', 'Şırnak',
+  'Bartın', 'Ardahan', 'Iğdır', 'Yalova', 'Karabük', 'Kilis', 'Osmaniye', 'Düzce'
+];
+
 async function fetchCollectApiMerged() {
   const collectKey = process.env.COLLECTAPI_KEY;
   if (!collectKey) return null;
@@ -143,59 +156,39 @@ async function fetchCollectApiMerged() {
     'content-type': 'application/json',
   };
 
-  async function fetchOne(pathSuffix) {
-    const url = `${base.replace(/\/$/, '')}/${pathSuffix}`;
-    const response = await fetch(url, { headers });
-    if (!response.ok) return null;
-    return response.json().catch(() => null);
-  }
-
-  const [gasolineJson, dieselJson, lpgJson] = await Promise.all([
-    fetchOne('turkeyGasoline'),
-    fetchOne('turkeyDiesel'),
-    fetchOne('turkeyLpg'),
-  ]);
-
-  const gasolineArr = extractArray(gasolineJson);
-  const dieselArr = extractArray(dieselJson);
-  const lpgArr = extractArray(lpgJson);
-  if (!gasolineArr || !dieselArr || !lpgArr) return null;
-
-  const pricesByCity = {};
-
-  for (const item of gasolineArr) {
-    const cityKey = normalizeCityKey(extractCity(item));
-    const value = extractPrice(item);
-    if (!cityKey || value == null) continue;
-    pricesByCity[cityKey] ||= {};
-    mergePriceField(pricesByCity[cityKey], 'benzin', value);
-  }
-
-  for (const item of dieselArr) {
-    const cityKey = normalizeCityKey(extractCity(item));
-    const value = extractPrice(item);
-    if (!cityKey || value == null) continue;
-    pricesByCity[cityKey] ||= {};
-    mergePriceField(pricesByCity[cityKey], 'motorin', value);
-  }
-
-  for (const item of lpgArr) {
-    const cityKey = normalizeCityKey(extractCity(item));
-    const value = extractPrice(item);
-    if (!cityKey || value == null) continue;
-    pricesByCity[cityKey] ||= {};
-    mergePriceField(pricesByCity[cityKey], 'lpg', value);
-  }
-
-  const merged = {};
-  for (const [city, p] of Object.entries(pricesByCity)) {
-    if (p && typeof p.benzin === 'number' && typeof p.motorin === 'number' && typeof p.lpg === 'number') {
-      merged[city] = { benzin: p.benzin, motorin: p.motorin, lpg: p.lpg };
+  async function fetchCityFuel(city, fuelType) {
+    const url = `${base.replace(/\/$/, '')}/${fuelType}?city=${encodeURIComponent(city)}`;
+    try {
+      const response = await fetch(url, { headers });
+      if (!response.ok) return null;
+      const json = await response.json().catch(() => null);
+      const arr = extractArray(json);
+      if (!arr || arr.length === 0) return null;
+      // İlk sonuçtan fiyatı al
+      return extractPrice(arr[0]);
+    } catch {
+      return null;
     }
   }
 
-  if (Object.keys(merged).length === 0) return null;
-  return { prices: merged, lastUpdate: new Date().toISOString() };
+  const pricesByCity = {};
+  
+  // Her şehir için 3 yakıt tipini paralel çek
+  await Promise.all(TURKEY_CITIES.map(async (city) => {
+    const [benzin, motorin, lpg] = await Promise.all([
+      fetchCityFuel(city, 'turkeyGasoline'),
+      fetchCityFuel(city, 'turkeyDiesel'),
+      fetchCityFuel(city, 'turkeyLpg'),
+    ]);
+    
+    if (benzin != null && motorin != null && lpg != null) {
+      const cityKey = normalizeCityKey(city);
+      pricesByCity[cityKey] = { benzin, motorin, lpg };
+    }
+  }));
+
+  if (Object.keys(pricesByCity).length === 0) return null;
+  return { prices: pricesByCity, lastUpdate: new Date().toISOString() };
 }
 
 // ---------------- Handlers ----------------
