@@ -55,12 +55,12 @@ function normalizeCityKey(input) {
   return String(input)
     .trim()
     .toUpperCase()
-    .replace(/İ/g, 'I')
-    .replace(/Ğ/g, 'G')
-    .replace(/Ü/g, 'U')
-    .replace(/Ş/g, 'S')
-    .replace(/Ö/g, 'O')
-    .replace(/Ç/g, 'C')
+    .replace(/Ä°/g, 'I')
+    .replace(/Ä/g, 'G')
+    .replace(/Ãœ/g, 'U')
+    .replace(/Å/g, 'S')
+    .replace(/Ã–/g, 'O')
+    .replace(/Ã‡/g, 'C')
     .replace(/[^A-Z0-9]/g, '');
 }
 
@@ -69,13 +69,13 @@ function toCollectCityParam(input) {
   return String(input)
     .trim()
     .toLowerCase()
-    .replace(/İ/g, 'i')
-    .replace(/ı/g, 'i')
-    .replace(/ğ/g, 'g')
-    .replace(/ü/g, 'u')
-    .replace(/ş/g, 's')
-    .replace(/ö/g, 'o')
-    .replace(/ç/g, 'c');
+    .replace(/Ä°/g, 'i')
+    .replace(/Ä±/g, 'i')
+    .replace(/ÄŸ/g, 'g')
+    .replace(/Ã¼/g, 'u')
+    .replace(/ÅŸ/g, 's')
+    .replace(/Ã¶/g, 'o')
+    .replace(/Ã§/g, 'c');
 }
 
 function sleep(ms) {
@@ -165,7 +165,7 @@ function requireToken(req, res) {
 
 // ---------------- Petrol Ofisi Scraper (Primary) ----------------
 async function fetchPetrolOfisiPrices() {
-  // Petrol Ofisi sayfası tek istekte 81 ilin tüm fiyatlarını veriyor
+  // Petrol Ofisi sayfasÄ± tek istekte 81 ilin tÃ¼m fiyatlarÄ±nÄ± veriyor
   const url = 'https://www.petrolofisi.com.tr/akaryakit-fiyatlari';
   
   try {
@@ -181,14 +181,18 @@ async function fetchPetrolOfisiPrices() {
     
     const pricesByCity = {};
     
-    // HTML'den şehir bloklarını parse et
-    // Format: "SEHIR V/Max Kurşunsuz 9553.17 TL/LT V/Max Diesel54.58 TL/LT ... PO/gaz Otogaz29.03 TL/LT"
-    const cityPattern = /([A-ZİĞÜŞÖÇIı]+(?:\s*\([^)]+\))?)\s+V\/Max Kurşunsuz 95([\d,\.]+)\s*TL\/LT\s+V\/Max Diesel([\d,\.]+)\s*TL\/LT[^P]*PO\/gaz Otogaz([\d,\.]+)\s*TL\/LT/gi;
+    // HTML'den tablo satÄ±rlarÄ±nÄ± parse et
+    // Format: <tr class="price-row district-..." data-disctrict-name="ANKARA">
+    //         <td>ANKARA</td>
+    //         <td><span class="with-tax">54.00</span>...</td> (benzin)
+    //         <td><span class="with-tax">55.58</span>...</td> (motorin)
+    //         <td><span class="with-tax">45.22</span>...</td> (lpg)
+    const cityPattern = /price-row[^>]+data-disctrict-name="([^"]+)"[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>/g;
     
     let match;
     while ((match = cityPattern.exec(html)) !== null) {
       let cityName = match[1].trim();
-      // "ISTANBUL (AVRUPA)" -> "ISTANBUL" şeklinde normalize et
+      // "ISTANBUL (AVRUPA)" -> "ISTANBUL" ÅŸeklinde normalize et
       cityName = cityName.replace(/\s*\([^)]+\)/, '').trim();
       
       const benzin = parseMaybeNumber(match[2]);
@@ -198,7 +202,7 @@ async function fetchPetrolOfisiPrices() {
       if (benzin != null || motorin != null || lpg != null) {
         const cityKey = normalizeCityKey(cityName);
         
-        // Eğer şehir zaten varsa (örn: ISTANBUL AVRUPA ve ANADOLU) en düşük fiyatı al
+        // EÄŸer ÅŸehir zaten varsa (Ã¶rn: ISTANBUL AVRUPA ve ANADOLU) en dÃ¼ÅŸÃ¼k fiyatÄ± al
         if (!pricesByCity[cityKey]) {
           pricesByCity[cityKey] = {};
         }
@@ -230,16 +234,16 @@ async function fetchPetrolOfisiPrices() {
 
 // ---------------- CollectAPI fetch & merge (Fallback) ----------------
 const TURKEY_CITIES = [
-  'Adana', 'Adıyaman', 'Afyonkarahisar', 'Ağrı', 'Amasya', 'Ankara', 'Antalya', 'Artvin',
-  'Aydın', 'Balıkesir', 'Bilecik', 'Bingöl', 'Bitlis', 'Bolu', 'Burdur', 'Bursa',
-  'Çanakkale', 'Çankırı', 'Çorum', 'Denizli', 'Diyarbakır', 'Edirne', 'Elazığ', 'Erzincan',
-  'Erzurum', 'Eskişehir', 'Gaziantep', 'Giresun', 'Gümüşhane', 'Hakkari', 'Hatay', 'Isparta',
-  'Mersin', 'İstanbul', 'İzmir', 'Kars', 'Kastamonu', 'Kayseri', 'Kırklareli', 'Kırşehir',
-  'Kocaeli', 'Konya', 'Kütahya', 'Malatya', 'Manisa', 'Kahramanmaraş', 'Mardin', 'Muğla',
-  'Muş', 'Nevşehir', 'Niğde', 'Ordu', 'Rize', 'Sakarya', 'Samsun', 'Siirt', 'Sinop',
-  'Sivas', 'Tekirdağ', 'Tokat', 'Trabzon', 'Tunceli', 'Şanlıurfa', 'Uşak', 'Van',
-  'Yozgat', 'Zonguldak', 'Aksaray', 'Bayburt', 'Karaman', 'Kırıkkale', 'Batman', 'Şırnak',
-  'Bartın', 'Ardahan', 'Iğdır', 'Yalova', 'Karabük', 'Kilis', 'Osmaniye', 'Düzce'
+  'Adana', 'AdÄ±yaman', 'Afyonkarahisar', 'AÄŸrÄ±', 'Amasya', 'Ankara', 'Antalya', 'Artvin',
+  'AydÄ±n', 'BalÄ±kesir', 'Bilecik', 'BingÃ¶l', 'Bitlis', 'Bolu', 'Burdur', 'Bursa',
+  'Ã‡anakkale', 'Ã‡ankÄ±rÄ±', 'Ã‡orum', 'Denizli', 'DiyarbakÄ±r', 'Edirne', 'ElazÄ±ÄŸ', 'Erzincan',
+  'Erzurum', 'EskiÅŸehir', 'Gaziantep', 'Giresun', 'GÃ¼mÃ¼ÅŸhane', 'Hakkari', 'Hatay', 'Isparta',
+  'Mersin', 'Ä°stanbul', 'Ä°zmir', 'Kars', 'Kastamonu', 'Kayseri', 'KÄ±rklareli', 'KÄ±rÅŸehir',
+  'Kocaeli', 'Konya', 'KÃ¼tahya', 'Malatya', 'Manisa', 'KahramanmaraÅŸ', 'Mardin', 'MuÄŸla',
+  'MuÅŸ', 'NevÅŸehir', 'NiÄŸde', 'Ordu', 'Rize', 'Sakarya', 'Samsun', 'Siirt', 'Sinop',
+  'Sivas', 'TekirdaÄŸ', 'Tokat', 'Trabzon', 'Tunceli', 'ÅanlÄ±urfa', 'UÅŸak', 'Van',
+  'Yozgat', 'Zonguldak', 'Aksaray', 'Bayburt', 'Karaman', 'KÄ±rÄ±kkale', 'Batman', 'ÅÄ±rnak',
+  'BartÄ±n', 'Ardahan', 'IÄŸdÄ±r', 'Yalova', 'KarabÃ¼k', 'Kilis', 'Osmaniye', 'DÃ¼zce'
 ];
 
 async function fetchCollectApiMerged() {
@@ -257,7 +261,7 @@ async function fetchCollectApiMerged() {
 
   async function fetchJsonWithRetry(url) {
     let attempt = 0;
-    // 429/5xx durumlarında kısa backoff ile retry.
+    // 429/5xx durumlarÄ±nda kÄ±sa backoff ile retry.
     while (true) {
       let response;
       try {
@@ -294,7 +298,7 @@ async function fetchCollectApiMerged() {
       if (!ok) return null;
       const arr = extractArray(json);
       if (!arr || arr.length === 0) return null;
-      // İstasyondan gelen liste içinde en düşük fiyatı al
+      // Ä°stasyondan gelen liste iÃ§inde en dÃ¼ÅŸÃ¼k fiyatÄ± al
       return minPriceFromArray(arr);
     } catch {
       return null;
@@ -303,8 +307,8 @@ async function fetchCollectApiMerged() {
 
   const pricesByCity = {};
 
-  // 81 şehir * 3 istek = 243 istek. Tam paralel gidince upstream 500/limit oluyor.
-  // Bu yüzden sınırlı paralellik ile şehirleri işliyoruz.
+  // 81 ÅŸehir * 3 istek = 243 istek. Tam paralel gidince upstream 500/limit oluyor.
+  // Bu yÃ¼zden sÄ±nÄ±rlÄ± paralellik ile ÅŸehirleri iÅŸliyoruz.
   let idx = 0;
   async function worker() {
     while (true) {
@@ -419,11 +423,11 @@ async function handleSource(req, res) {
 async function handleUpdate(req, res) {
   if (!requireToken(req, res)) return;
 
-  // 1. Önce Petrol Ofisi'nden dene (tek istek, tüm şehirler, benzin+motorin+lpg)
+  // 1. Ã–nce Petrol Ofisi'nden dene (tek istek, tÃ¼m ÅŸehirler, benzin+motorin+lpg)
   let payload = await fetchPetrolOfisiPrices();
   let source = 'petrolofisi';
   
-  // 2. Petrol Ofisi başarısızsa CollectAPI'ye fallback
+  // 2. Petrol Ofisi baÅŸarÄ±sÄ±zsa CollectAPI'ye fallback
   if (!payload || Object.keys(payload.prices || {}).length < 10) {
     payload = await fetchCollectApiMerged();
     source = 'collectapi';
