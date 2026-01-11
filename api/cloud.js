@@ -98,17 +98,17 @@ async function fetchPetrolOfisiPrices() {
     // <td><span class="with-tax">55.58</span>...</td> (motorin)
     // ... diğer sütunlar ...
     // <td><span class="with-tax">29.29</span>...</td> (LPG/otogaz)  <--- 7. sütun!
-    const cityPattern = /price-row[^>]+data-disctrict-name="([^"\n]+)"[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>/g;
+    const cityPattern = /price-row[^>]+data-disctrict-name="([^"\n]+)"[\s\S]*?<\/tr>/g;
     let match;
     while ((match = cityPattern.exec(html)) !== null) {
       let cityName = match[1].trim();
-      // Parantez içini de dahil et, ör: 'İSTANBUL (AVRUPA)' -> 'İSTANBUL AVRUPA'
       cityName = cityName.replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
-      const benzin = parseMaybeNumber(match[2]);
-      const motorin = parseMaybeNumber(match[3]);
-      const lpg = parseMaybeNumber(match[8]); // 7. sütun (8. grup)
+      // Tüm <span class="with-tax">...</span> değerlerini sırayla al
+      const tdMatches = [...match[0].matchAll(/<span class="with-tax">(\d+\.\d+)<\/span>/g)];
+      const benzin = tdMatches[0] ? parseMaybeNumber(tdMatches[0][1]) : null;
+      const motorin = tdMatches[1] ? parseMaybeNumber(tdMatches[1][1]) : null;
+      const lpg = tdMatches.length > 0 ? parseMaybeNumber(tdMatches[tdMatches.length - 1][1]) : null;
       if (benzin != null || motorin != null || lpg != null) {
-        // Şehir adını büyük harf ve boşluklu olarak kullan (ör: 'ISTANBUL AVRUPA')
         const cityKey = cityName.toUpperCase();
         if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
         if (benzin != null) pricesByCity[cityKey].benzin = benzin;
@@ -140,14 +140,15 @@ async function fetchOpetPrices() {
     // <td>54.00</td> (benzin)
     // <td>55.58</td> (motorin)
     // <td>45.22</td> (lpg)
-    const cityPattern = /<tr[^>]*data-city="([^"]+)"[\s\S]*?<td>(\d+\.\d+)<\/td>[\s\S]*?<td>(\d+\.\d+)<\/td>[\s\S]*?<td>(\d+\.\d+)<\/td>/g;
+    const cityPattern = /<tr[^>]*data-city="([^"]+)"[\s\S]*?<\/tr>/g;
     let match;
     while ((match = cityPattern.exec(html)) !== null) {
       let cityName = match[1].trim();
       cityName = cityName.replace(/\s*\([^)]+\)/, '').trim();
-      const benzin = parseMaybeNumber(match[2]);
-      const motorin = parseMaybeNumber(match[3]);
-      const lpg = parseMaybeNumber(match[4]);
+      const tdMatches = [...match[0].matchAll(/<td>(\d+[\.,]\d+)<\/td>/g)];
+      const benzin = tdMatches[0] ? parseMaybeNumber(tdMatches[0][1].replace(',', '.')) : null;
+      const motorin = tdMatches[1] ? parseMaybeNumber(tdMatches[1][1].replace(',', '.')) : null;
+      const lpg = tdMatches.length > 0 ? parseMaybeNumber(tdMatches[tdMatches.length - 1][1].replace(',', '.')) : null;
       if (benzin != null || motorin != null || lpg != null) {
         const cityKey = normalizeCityKey(cityName);
         if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
@@ -176,14 +177,15 @@ async function fetchShellPrices() {
     const html = await response.text();
     const pricesByCity = {};
     // Shell sitesinde şehir bazında tablo: <tr><td>ANKARA</td><td>54.00</td><td>55.58</td><td>45.22</td></tr>
-    const cityPattern = /<tr[^>]*>\s*<td>([^<]+)<\/td>\s*<td>(\d+\.\d+)<\/td>\s*<td>(\d+\.\d+)<\/td>\s*<td>(\d+\.\d+)<\/td>/g;
+    const cityPattern = /<tr[^>]*>\s*<td>([^<]+)<\/td>[\s\S]*?<\/tr>/g;
     let match;
     while ((match = cityPattern.exec(html)) !== null) {
       let cityName = match[1].trim();
       cityName = cityName.replace(/\s*\([^)]+\)/, '').trim();
-      const benzin = parseMaybeNumber(match[2]);
-      const motorin = parseMaybeNumber(match[3]);
-      const lpg = parseMaybeNumber(match[4]);
+      const tdMatches = [...match[0].matchAll(/<td>(\d+[\.,]\d+)<\/td>/g)];
+      const benzin = tdMatches[0] ? parseMaybeNumber(tdMatches[0][1].replace(',', '.')) : null;
+      const motorin = tdMatches[1] ? parseMaybeNumber(tdMatches[1][1].replace(',', '.')) : null;
+      const lpg = tdMatches.length > 0 ? parseMaybeNumber(tdMatches[tdMatches.length - 1][1].replace(',', '.')) : null;
       if (benzin != null || motorin != null || lpg != null) {
         const cityKey = normalizeCityKey(cityName);
         if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
@@ -212,14 +214,15 @@ async function fetchBPPrices() {
     const html = await response.text();
     const pricesByCity = {};
     // BP sitesinde şehir bazında tablo: <tr><td>ANKARA</td><td>54.00</td><td>55.58</td><td>45.22</td></tr>
-    const cityPattern = /<tr[^>]*>\s*<td>([^<]+)<\/td>\s*<td>(\d+\.\d+)<\/td>\s*<td>(\d+\.\d+)<\/td>\s*<td>(\d+\.\d+)<\/td>/g;
+    const cityPattern = /<tr[^>]*>\s*<td>([^<]+)<\/td>[\s\S]*?<\/tr>/g;
     let match;
     while ((match = cityPattern.exec(html)) !== null) {
       let cityName = match[1].trim();
       cityName = cityName.replace(/\s*\([^)]+\)/, '').trim();
-      const benzin = parseMaybeNumber(match[2]);
-      const motorin = parseMaybeNumber(match[3]);
-      const lpg = parseMaybeNumber(match[4]);
+      const tdMatches = [...match[0].matchAll(/<td>(\d+[\.,]\d+)<\/td>/g)];
+      const benzin = tdMatches[0] ? parseMaybeNumber(tdMatches[0][1].replace(',', '.')) : null;
+      const motorin = tdMatches[1] ? parseMaybeNumber(tdMatches[1][1].replace(',', '.')) : null;
+      const lpg = tdMatches.length > 0 ? parseMaybeNumber(tdMatches[tdMatches.length - 1][1].replace(',', '.')) : null;
       if (benzin != null || motorin != null || lpg != null) {
         const cityKey = normalizeCityKey(cityName);
         if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
@@ -248,14 +251,15 @@ async function fetchTotalPrices() {
     const html = await response.text();
     const pricesByCity = {};
     // Total sitesinde şehir bazında tablo: <tr><td>ANKARA</td><td>54.00</td><td>55.58</td><td>45.22</td></tr>
-    const cityPattern = /<tr[^>]*>\s*<td>([^<]+)<\/td>\s*<td>(\d+\.\d+)<\/td>\s*<td>(\d+\.\d+)<\/td>\s*<td>(\d+\.\d+)<\/td>/g;
+    const cityPattern = /<tr[^>]*>\s*<td>([^<]+)<\/td>[\s\S]*?<\/tr>/g;
     let match;
     while ((match = cityPattern.exec(html)) !== null) {
       let cityName = match[1].trim();
       cityName = cityName.replace(/\s*\([^)]+\)/, '').trim();
-      const benzin = parseMaybeNumber(match[2]);
-      const motorin = parseMaybeNumber(match[3]);
-      const lpg = parseMaybeNumber(match[4]);
+      const tdMatches = [...match[0].matchAll(/<td>(\d+[\.,]\d+)<\/td>/g)];
+      const benzin = tdMatches[0] ? parseMaybeNumber(tdMatches[0][1].replace(',', '.')) : null;
+      const motorin = tdMatches[1] ? parseMaybeNumber(tdMatches[1][1].replace(',', '.')) : null;
+      const lpg = tdMatches.length > 0 ? parseMaybeNumber(tdMatches[tdMatches.length - 1][1].replace(',', '.')) : null;
       if (benzin != null || motorin != null || lpg != null) {
         const cityKey = normalizeCityKey(cityName);
         if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
@@ -284,14 +288,15 @@ async function fetchAytemizPrices() {
     const html = await response.text();
     const pricesByCity = {};
     // Aytemiz sitesinde şehir bazında tablo: <tr><td>ANKARA</td><td>54,00</td><td>55,58</td><td>45,22</td></tr>
-    const cityPattern = /<tr[^>]*>\s*<td>([^<]+)<\/td>\s*<td>(\d+[\.,]\d+)<\/td>\s*<td>(\d+[\.,]\d+)<\/td>\s*<td>(\d+[\.,]\d+)<\/td>/g;
+    const cityPattern = /<tr[^>]*>\s*<td>([^<]+)<\/td>[\s\S]*?<\/tr>/g;
     let match;
     while ((match = cityPattern.exec(html)) !== null) {
       let cityName = match[1].trim();
       cityName = cityName.replace(/\s*\([^)]+\)/, '').trim();
-      const benzin = parseMaybeNumber(match[2].replace(',', '.'));
-      const motorin = parseMaybeNumber(match[3].replace(',', '.'));
-      const lpg = parseMaybeNumber(match[4].replace(',', '.'));
+      const tdMatches = [...match[0].matchAll(/<td>(\d+[\.,]\d+)<\/td>/g)];
+      const benzin = tdMatches[0] ? parseMaybeNumber(tdMatches[0][1].replace(',', '.')) : null;
+      const motorin = tdMatches[1] ? parseMaybeNumber(tdMatches[1][1].replace(',', '.')) : null;
+      const lpg = tdMatches.length > 0 ? parseMaybeNumber(tdMatches[tdMatches.length - 1][1].replace(',', '.')) : null;
       if (benzin != null || motorin != null || lpg != null) {
         const cityKey = normalizeCityKey(cityName);
         if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
@@ -367,6 +372,22 @@ async function scrapeAndStoreAllPrices() {
     allResults['AYTEMIZ'] = aytemiz;
     sources.push('aytemiz');
   }
+  const sunpet = await fetchSunpetPrices();
+  if (sunpet && Object.keys(sunpet).length > 0) {
+    allResults['SUNPET'] = sunpet;
+    sources.push('sunpet');
+  }
+  const alpet = await fetchAlpetPrices();
+  if (alpet && Object.keys(alpet).length > 0) {
+    allResults['ALPET'] = alpet;
+    sources.push('alpet');
+  }
+  const lukoil = await fetchLukoilPrices();
+  if (lukoil && Object.keys(lukoil).length > 0) {
+    allResults['LUKOIL'] = lukoil;
+    sources.push('lukoil');
+  }
+  // ... Diğer markalar için de aynı şekilde ekleyebilirsin ...
   // ... Diğer markalar ...
 
   // KV'ye her firmanın fiyatlarını ayrı ayrı kaydet
