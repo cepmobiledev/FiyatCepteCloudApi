@@ -1,7 +1,0 @@
-{
-  "rewrites": [
-    { "source": "/api/prices", "destination": "/api/cloud" },
-    { "source": "/api/update", "destination": "/api/cloud" },
-    { "source": "/api/health", "destination": "/api/cloud" }
-  ]
-}
