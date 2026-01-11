@@ -1,22 +1,20 @@
 // cloud.js
-// Vercel Serverless API - Akaryakıt Cloud
+// Vercel Serverless API - Akaryakıt Cloud (CollectAPI)
 //
-// Kullandığı kaynak: CollectAPI Akaryakıt Fiyatları API
-//   https://collectapi.com/tr/api/gasPrice/akaryakit-fiyatlari-api
+// Kaynak: CollectAPI Gas Price (TR) endpoint'leri
+//  - /gasPrice/turkeyGasoline?city={city}&district={district}
+//  - /gasPrice/turkeyDiesel?city={city}&district={district}
+//  - /gasPrice/turkeyLpg?city={city}
 //
-// Routes:
-//   GET /api/health
-//   GET /api/prices              → tüm şehirler / filtreli şehir
-//   GET /api/update              → CollectAPI'den tüm şehirleri çek, KV'ye yaz
+// ENV GEREKSİNİMLERİ
+//  - KV_REST_API_URL                veya  UPSTASH_REDIS_KV_REST_API_URL
+//  - KV_REST_API_TOKEN              veya  UPSTASH_REDIS_KV_REST_API_TOKEN
+//  - COLLECTAPI_KEY                 → "2kBD..." (sadece anahtar, başına 'apikey ' ekleme)
 //
-// KV Key: "fuel:prices"
-//
-// KV ENV:
-//   KV_REST_API_URL                veya  UPSTASH_REDIS_KV_REST_API_URL
-//   KV_REST_API_TOKEN              veya  UPSTASH_REDIS_KV_REST_API_TOKEN
-//
-// CollectAPI ENV:
-//   COLLECTAPI_KEY  → "apikey {KEY}" şeklinde kullanılacak KEY
+// ROUTES
+//  - GET /api/health   → KV durumu
+//  - GET /api/prices   → tüm şehirler veya ?city=ISPARTA
+//  - GET /api/update   → CollectAPI'den çek, KV'ye yaz
 
 ///////////////////////////
 // KV BAĞLANTISI
@@ -99,7 +97,7 @@ function normalizeCityKey(input) {
     .replace(/\s+/g, "_");
 }
 
-function parsePrice(value) {
+function parseMaybeNumber(value) {
   if (typeof value === "number") {
     return Number.isFinite(value) ? value : null;
   }
@@ -118,11 +116,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getCollectApiKey() {
+  const key = process.env.COLLECTAPI_KEY;
+  if (!key) {
+    console.error("COLLECTAPI_KEY env missing");
+  }
+  return key;
+}
+
 ///////////////////////////
-// COLLECTAPI İLE FİYAT ÇEKME
+// COLLECTAPI ENDPOINT'LERİ
 ///////////////////////////
 
-// Türkiye il listesi (CollectAPI Türkçe şehir adı ile çalışıyor)
+// Not: Burada performans ve kota açısından "şehir odaklı" çalışılacak.
+// Türkiye il listesi:
 const TURKEY_CITIES = [
   "Adana","Adıyaman","Afyonkarahisar","Ağrı","Aksaray","Amasya","Ankara",
   "Antalya","Ardahan","Artvin","Aydın","Balıkesir","Bartın","Batman",
@@ -138,126 +145,125 @@ const TURKEY_CITIES = [
   "Zonguldak"
 ];
 
-const COLLECTAPI_BASE =
-  "https://api.collectapi.com/gasPrice/fromCity"; // ?city={SEHIR}[web:54]
+// CollectAPI dokümantasyonundaki benzin endpoint'i.[web:71]
+const GASOLINE_URL = "https://api.collectapi.com/gasPrice/turkeyGasoline";
+const DIESEL_URL = "https://api.collectapi.com/gasPrice/turkeyDiesel";
+const LPG_URL = "https://api.collectapi.com/gasPrice/turkeyLpg"; // LPG şehir bazlı.[web:54]
 
-function getCollectApiKey() {
-  const key = process.env.COLLECTAPI_KEY;
-  if (!key) {
-    console.error("COLLECTAPI_KEY env missing");
-  }
-  return key;
-}
+async function collectGet(url) {
+  const key = getCollectApiKey();
+  if (!key) return null;
 
-// CollectAPI response örneği (özet):
-// {
-//   "success": true,
-//   "result": [
-//     {
-//       "city": "İstanbul",
-//       "name": "OPET",
-//       "district": "BAĞCILAR",
-//       "gasoline": "42,50",
-//       "diesel": "40,20",
-//       "lpg": "22,10"
-//     },
-//     ...
-//   ]
-// }
-
-async function fetchCityFromCollectAPI(cityName) {
-  const apiKey = getCollectApiKey();
-  if (!apiKey) return [];
-
-  const url = `${COLLECTAPI_BASE}?city=${encodeURIComponent(cityName)}`;
   try {
     const res = await fetch(url, {
+      method: "GET",
       headers: {
         "content-type": "application/json",
-        authorization: `apikey ${apiKey}`, // CollectAPI bu formatı istiyor[web:54]
+        authorization: `apikey ${key}`,
       },
     });
 
     if (!res.ok) {
-      console.error("CollectAPI city error", cityName, res.status);
-      return [];
+      console.error("CollectAPI HTTP", res.status, url);
+      return null;
     }
 
     const json = await res.json().catch(() => null);
-    if (!json || !json.success || !Array.isArray(json.result)) {
-      return [];
+    if (!json || json.success !== true) {
+      console.error("CollectAPI bad json", url);
+      return null;
     }
-    return json.result;
+
+    return json.result || [];
   } catch (e) {
-    console.error("CollectAPI fetch error", cityName, e);
-    return [];
+    console.error("CollectAPI error", url, e);
+    return null;
   }
 }
 
+// Şehir için benzin + motorin + LPG verilerini çeker.
+// İlçe parametresi yoksa şehir ortalaması (CollectAPI ne veriyorsa) alınır.[web:54][web:71]
+async function fetchCityCombined(cityName) {
+  const cityParam = encodeURIComponent(cityName);
+
+  const [gasolineResult, dieselResult, lpgResult] = await Promise.all([
+    collectGet(`${GASOLINE_URL}?city=${cityParam}`),
+    collectGet(`${DIESEL_URL}?city=${cityParam}`),
+    collectGet(`${LPG_URL}?city=${cityParam}`),
+  ]);
+
+  // JSON şekilleri:
+  // gasolineResult: [{ benzin, katkili, marka }, ...]
+  // dieselResult:   [{ motorin, katkili, marka }, ...]
+  // lpgResult:      [{ lastupdate, price: [{ lpg, marka }, ...] }]
+  const cityKey = normalizeCityKey(cityName);
+
+  const byBrand = {};
+
+  if (Array.isArray(gasolineResult)) {
+    for (const item of gasolineResult) {
+      const brand = (item.marka || "").toString().trim().toUpperCase();
+      if (!brand) continue;
+      if (!byBrand[brand]) byBrand[brand] = { city: cityKey, brand };
+      const benzin = parseMaybeNumber(item.benzin);
+      if (benzin != null) byBrand[brand].benzin = benzin;
+    }
+  }
+
+  if (Array.isArray(dieselResult)) {
+    for (const item of dieselResult) {
+      const brand = (item.marka || "").toString().trim().toUpperCase();
+      if (!brand) continue;
+      if (!byBrand[brand]) byBrand[brand] = { city: cityKey, brand };
+      const motorin = parseMaybeNumber(item.motorin);
+      if (motorin != null) byBrand[brand].motorin = motorin;
+    }
+  }
+
+  if (Array.isArray(lpgResult) && lpgResult.length > 0) {
+    const first = lpgResult[0];
+    if (first && Array.isArray(first.price)) {
+      for (const p of first.price) {
+        const brand = (p.marka || "").toString().trim().toUpperCase();
+        if (!brand) continue;
+        if (!byBrand[brand]) byBrand[brand] = { city: cityKey, brand };
+        const lpg = parseMaybeNumber(p.lpg);
+        if (lpg != null) byBrand[brand].lpg = lpg;
+      }
+    }
+  }
+
+  return { cityKey, byBrand };
+}
+
 ///////////////////////////
-// TÜM ŞEHİRLERİ ÇEK + KV YE YAZ
+// TÜM ŞEHİRLERİ ÇEK + ORTALAMA
 ///////////////////////////
 
-// KV'de tutulan yapı:
-//
-// {
-//   allFirmPrices: {
-//     OPET: {
-//       ISTANBUL__BAGCILAR_1: { city, district, stationName, benzin, motorin, lpg },
-//       ...
-//     },
-//     SHELL: {...},
-//     ...
-//   },
-//   cityAverages: {
-//     ISTANBUL: { benzin, motorin, lpg },
-//     ISPARTA: { ... },
-//     ...
-//   },
-//   sources: ["collectapi"],
-//   lastUpdate: ISO_STRING
-// }
+function buildStructures(allCitiesByBrand) {
+  // allCitiesByBrand: { [cityKey]: { [brand]: { city, brand, benzin?, motorin?, lpg? } } }
 
-function buildStructuresFromCollectData(allCityResults) {
-  const allFirmPrices = {};
-  const cityBuckets = {};
+  const allFirmPrices = {}; // MARKA → CITY → data
+  const cityBuckets = {}; // CITY → arrays for averaging
 
-  let stationIdCounter = 0;
+  for (const [cityKey, brandMap] of Object.entries(allCitiesByBrand)) {
+    if (!cityBuckets[cityKey]) {
+      cityBuckets[cityKey] = { benzin: [], motorin: [], lpg: [] };
+    }
 
-  for (const cityResult of allCityResults) {
-    for (const item of cityResult) {
-      const brandName = (item.name || "").toString().trim().toUpperCase();
-      if (!brandName) continue;
-
-      const cityRaw = item.city || "";
-      const districtRaw = item.district || "";
-      const cityKey = normalizeCityKey(cityRaw);
-      const districtKey = normalizeCityKey(districtRaw);
-      const locKey = districtKey && districtKey !== cityKey
-        ? `${cityKey}__${districtKey}_${++stationIdCounter}`
-        : `${cityKey}_${++stationIdCounter}`;
-
-      const benzin = parsePrice(item.gasoline);
-      const motorin = parsePrice(item.diesel);
-      const lpg = parsePrice(item.lpg);
-
-      if (!allFirmPrices[brandName]) allFirmPrices[brandName] = {};
-      allFirmPrices[brandName][locKey] = {
-        brand: brandName,
+    for (const [brand, data] of Object.entries(brandMap)) {
+      if (!allFirmPrices[brand]) allFirmPrices[brand] = {};
+      allFirmPrices[brand][cityKey] = {
         city: cityKey,
-        district: districtKey,
-        stationName: item.name || "",
-        benzin,
-        motorin,
-        lpg,
+        brand,
+        benzin: data.benzin ?? null,
+        motorin: data.motorin ?? null,
+        lpg: data.lpg ?? null,
       };
 
-      if (!cityBuckets[cityKey]) {
-        cityBuckets[cityKey] = { benzin: [], motorin: [], lpg: [] };
-      }
-      if (benzin != null) cityBuckets[cityKey].benzin.push(benzin);
-      if (motorin != null) cityBuckets[cityKey].motorin.push(motorin);
-      if (lpg != null) cityBuckets[cityKey].lpg.push(lpg);
+      if (data.benzin != null) cityBuckets[cityKey].benzin.push(data.benzin);
+      if (data.motorin != null) cityBuckets[cityKey].motorin.push(data.motorin);
+      if (data.lpg != null) cityBuckets[cityKey].lpg.push(data.lpg);
     }
   }
 
@@ -280,18 +286,17 @@ function buildStructuresFromCollectData(allCityResults) {
 }
 
 async function scrapeAndStoreAllPrices() {
-  const allCityResults = [];
+  const allCitiesByBrand = {};
 
   for (const city of TURKEY_CITIES) {
-    await sleep(400); // CollectAPI rate limit'i için biraz bekle[web:54]
-    const result = await fetchCityFromCollectAPI(city);
-    if (result.length > 0) {
-      allCityResults.push(result);
+    await sleep(350); // API limitine saygı.[web:54]
+    const { cityKey, byBrand } = await fetchCityCombined(city);
+    if (Object.keys(byBrand).length > 0) {
+      allCitiesByBrand[cityKey] = byBrand;
     }
   }
 
-  const { allFirmPrices, cityAverages } =
-    buildStructuresFromCollectData(allCityResults);
+  const { allFirmPrices, cityAverages } = buildStructures(allCitiesByBrand);
 
   const dataToStore = {
     allFirmPrices,
@@ -351,13 +356,12 @@ async function handlePrices(req, res) {
     });
   }
 
-  // belirli şehir için filtre
   const filteredFirmPrices = {};
-  for (const [brand, locations] of Object.entries(allFirmPrices)) {
-    for (const [locKey, data] of Object.entries(locations)) {
-      if (data.city === cityKey) {
+  for (const [brand, cityMap] of Object.entries(allFirmPrices)) {
+    for (const [cKey, data] of Object.entries(cityMap)) {
+      if (cKey === cityKey) {
         if (!filteredFirmPrices[brand]) filteredFirmPrices[brand] = {};
-        filteredFirmPrices[brand][locKey] = data;
+        filteredFirmPrices[brand][cKey] = data;
       }
     }
   }
@@ -394,4 +398,3 @@ module.exports = async (req, res) => {
 
   return handlePrices(req, res);
 };
-s
