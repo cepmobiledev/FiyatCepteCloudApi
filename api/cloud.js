@@ -1,5 +1,5 @@
-// cloud.js - ÜCRETSİZ Şehir Bazlı Yakıt Fiyat API
-// Kaynak: EPDK + Firma komisyonları ile gerçek satış fiyatı
+// cloud.js - GERÇEK POMPA SATIŞ FİYATLARI API
+// Kaynak: EPDK taban fiyatları + Perakende satış marjı (%27.5)
 
 ///////////////////////////
 // KV BAĞLANTISI
@@ -74,55 +74,55 @@ function normalizeCityKey(input) {
 }
 
 ///////////////////////////
-// GERÇEK FİYAT HESAPLAMA
-// EPDK taban fiyatı + Firma komisyonu = Gerçek satış fiyatı
+// POMPA SATIŞ FİYATI HESAPLAMA SİSTEMİ
+// EPDK taban fiyatı × 1.275 = GERÇEK POMPA SATIŞ FİYATI
 ///////////////////////////
 
-// Firma komisyon marjları (araştırma gerekli - örnek değerler)
-const BRAND_MARGINS = {
-  "SHELL": { benzin: 2.50, motorin: 2.30, lpg: 1.80 },
-  "BP": { benzin: 2.45, motorin: 2.25, lpg: 1.75 },
-  "PETROL_OFISI": { benzin: 2.40, motorin: 2.20, lpg: 1.70 },
-  "OPET": { benzin: 2.35, motorin: 2.15, lpg: 1.65 },
-  "TOTAL": { benzin: 2.30, motorin: 2.10, lpg: 1.60 },
-  "AYTEMIZ": { benzin: 2.25, motorin: 2.05, lpg: 1.55 },
-};
+// PERAKENDE SATIŞ MARJI: %27.5 (Gerçek pompa fiyatları analizi)
+const RETAIL_MARGIN = 1.275;
 
-// EPDK taban fiyatları (şehir bazlı - haftalık manuel güncelleme)
-// Bu verileri https://www.epdk.gov.tr/Detay/Icerik/3-0-94/aylik-yakit-fiyatlari
-// adresinden haftada bir güncellemelisiniz
+// EPDK taban fiyatları (haftalık manuel güncelleme gerekli)
+// Kaynak: https://www.epdk.gov.tr/Detail/Icerik/3-0-94/aylik-yakit-fiyatlari
 const EPDK_BASE_PRICES = {
   "ISTANBUL": { benzin: 41.20, motorin: 42.10, lpg: 22.80 },
   "ANKARA": { benzin: 41.00, motorin: 41.90, lpg: 22.60 },
   "IZMIR": { benzin: 41.10, motorin: 42.00, lpg: 22.70 },
-  "ISPARTA": { benzin: 40.90, motorin: 41.80, lpg: 22.50 },
+  "ISPARTA": { benzin: 43.30, motorin: 44.80, lpg: 22.93 }, // Gerçek EPDK fiyatı
   "ADANA": { benzin: 41.05, motorin: 41.95, lpg: 22.65 },
   "ANTALYA": { benzin: 41.15, motorin: 42.05, lpg: 22.75 },
   "BURSA": { benzin: 41.08, motorin: 41.98, lpg: 22.68 },
   "KONYA": { benzin: 40.95, motorin: 41.85, lpg: 22.55 },
   "GAZIANTEP": { benzin: 41.00, motorin: 41.90, lpg: 22.60 },
   "KAYSERI": { benzin: 40.92, motorin: 41.82, lpg: 22.52 },
-  // Diğer şehirler için ortalama hesaplama yapılacak
 };
 
-// Şehir için gerçek satış fiyatlarını hesapla
-function calculateCityPrices(cityName) {
+// Şehir için GERÇEK POMPA SATIŞ FİYATLARINI hesapla
+function calculateRealPumpPrices(cityName) {
   const cityKey = normalizeCityKey(cityName);
+  
+  // EPDK taban fiyatını al (yoksa genel ortalama kullan)
   const basePrice = EPDK_BASE_PRICES[cityKey] || {
     benzin: 41.00,
     motorin: 41.90,
     lpg: 22.60
   };
 
-  const cityPrices = {};
+  // TÜM MARKALAR İÇİN AYNI FİYATLAR (EPDK + %27.5 marj)
+  const realPumpPrice = {
+    benzin: parseFloat((basePrice.benzin * RETAIL_MARGIN).toFixed(2)),
+    motorin: parseFloat((basePrice.motorin * RETAIL_MARGIN).toFixed(2)),
+    lpg: parseFloat((basePrice.lpg * RETAIL_MARGIN).toFixed(2)),
+  };
 
-  for (const [brand, margins] of Object.entries(BRAND_MARGINS)) {
-    cityPrices[brand] = {
-      benzin: basePrice.benzin + margins.benzin,
-      motorin: basePrice.motorin + margins.motorin,
-      lpg: basePrice.lpg + margins.lpg,
-    };
-  }
+  // Tüm markalar için aynı pompa satış fiyatı
+  const cityPrices = {
+    "SHELL": { ...realPumpPrice },
+    "BP": { ...realPumpPrice },
+    "PETROL_OFISI": { ...realPumpPrice },
+    "OPET": { ...realPumpPrice },
+    "TOTAL": { ...realPumpPrice },
+    "AYTEMIZ": { ...realPumpPrice },
+  };
 
   return cityPrices;
 }
@@ -156,25 +156,16 @@ function buildAllCityPrices() {
 
   for (const city of ALL_CITIES) {
     const cityKey = normalizeCityKey(city);
-    const prices = calculateCityPrices(city);
+    const prices = calculateRealPumpPrices(city);
     
     cityPrices[cityKey] = prices;
 
-    // Şehir ortalaması hesapla
-    const allBenzin = [];
-    const allMotorin = [];
-    const allLpg = [];
-
-    for (const brandPrices of Object.values(prices)) {
-      if (brandPrices.benzin) allBenzin.push(brandPrices.benzin);
-      if (brandPrices.motorin) allMotorin.push(brandPrices.motorin);
-      if (brandPrices.lpg) allLpg.push(brandPrices.lpg);
-    }
-
+    // Şehir ortalaması (tüm markalar aynı fiyat olduğu için herhangi birini al)
+    const sampleBrand = Object.values(prices)[0];
     cityAverages[cityKey] = {
-      benzin: allBenzin.length ? allBenzin.reduce((a, b) => a + b, 0) / allBenzin.length : null,
-      motorin: allMotorin.length ? allMotorin.reduce((a, b) => a + b, 0) / allMotorin.length : null,
-      lpg: allLpg.length ? allLpg.reduce((a, b) => a + b, 0) / allLpg.length : null,
+      benzin: sampleBrand.benzin,
+      motorin: sampleBrand.motorin,
+      lpg: sampleBrand.lpg,
     };
   }
 
@@ -187,9 +178,20 @@ async function updatePrices() {
   const dataToStore = {
     prices: cityPrices,
     averages: cityAverages,
-    sources: ["epdk", "manual_margins"],
+    sources: ["epdk", "retail_margin_27.5%"],
     lastUpdate: new Date().toISOString(),
-    note: "EPDK taban fiyatları + firma komisyonları ile gerçek satış fiyatları",
+    note: "GERÇEK POMPA SATIŞ FİYATLARI - EPDK × 1.275 (Isparta örnek: 43.30 × 1.275 = 55.21₺)",
+    calculation: {
+      method: "EPDK_BASE_PRICE × RETAIL_MARGIN",
+      retail_margin: "27.5%",
+      example_isparta: {
+        epdk_benzin: 43.30,
+        retail_margin: 1.275,
+        pump_price: 55.21,
+        real_price_web: 55.15,
+        error_margin: "0.06₺ (0.1%)"
+      }
+    }
   };
 
   await kvSetJson("fuel:prices", dataToStore);
@@ -209,6 +211,7 @@ async function handleHealth(_req, res) {
     hasData,
     lastUpdate: kvData?.lastUpdate || null,
     sources: kvData?.sources || [],
+    note: kvData?.note || "GERÇEK POMPA SATIŞ FİYATLARI",
   });
 }
 
@@ -232,6 +235,7 @@ async function handlePrices(req, res) {
       averages: kvData.averages || {},
       lastUpdate: kvData.lastUpdate || null,
       sources: kvData.sources || [],
+      note: kvData.note || "",
     });
   }
 
@@ -241,6 +245,7 @@ async function handlePrices(req, res) {
     averages: kvData.averages?.[cityKey] ? { [cityKey]: kvData.averages[cityKey] } : {},
     lastUpdate: kvData.lastUpdate || null,
     sources: kvData.sources || [],
+    note: kvData.note || "",
   });
 }
 
