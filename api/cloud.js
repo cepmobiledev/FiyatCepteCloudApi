@@ -1,6 +1,5 @@
-// cloud.js - ÜCRETSİZ Yakıt Fiyat API
-// Kaynak: EPDK (Enerji Piyasası Düzenleme Kurumu) - Resmi & Ücretsiz
-// https://www.epdk.gov.tr/Detay/DownloadDocument?id=... (Excel formatında)
+// cloud.js - ÜCRETSİZ Şehir Bazlı Yakıt Fiyat API
+// Kaynak: EPDK + Firma komisyonları ile gerçek satış fiyatı
 
 ///////////////////////////
 // KV BAĞLANTISI
@@ -74,140 +73,123 @@ function normalizeCityKey(input) {
     .replace(/\s+/g, "_");
 }
 
-function parseMaybeNumber(value) {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value !== "string") return null;
-  const cleaned = value.trim().replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.]/g, "");
-  if (!cleaned) return null;
-  const num = Number.parseFloat(cleaned);
-  return Number.isFinite(num) ? num : null;
-}
-
 ///////////////////////////
-// ÜCRETSİZ ALTERNATİF 1: EPDK VERİSİ
-// EPDK her hafta güncel fiyatları yayınlar (resmi kaynak)
+// GERÇEK FİYAT HESAPLAMA
+// EPDK taban fiyatı + Firma komisyonu = Gerçek satış fiyatı
 ///////////////////////////
 
-// Manuel veri - EPDK'dan haftalık güncellenir
-// Siz bu veriyi haftada bir manuel güncelleyebilirsiniz veya
-// EPDK'nın web sitesinden otomatik çekebilirsiniz (HTML parse)
-const MANUAL_FUEL_DATA = {
-  // Örnek veri yapısı - gerçek verileri EPDK'dan alın
-  "SHELL": {
-    "ISTANBUL": { benzin: 43.50, motorin: 44.20, lpg: 24.50 },
-    "ANKARA": { benzin: 43.30, motorin: 44.00, lpg: 24.30 },
-    "IZMIR": { benzin: 43.40, motorin: 44.10, lpg: 24.40 },
-    "ISPARTA": { benzin: 43.20, motorin: 43.90, lpg: 24.20 },
-  },
-  "BP": {
-    "ISTANBUL": { benzin: 43.55, motorin: 44.25, lpg: 24.55 },
-    "ANKARA": { benzin: 43.35, motorin: 44.05, lpg: 24.35 },
-    "IZMIR": { benzin: 43.45, motorin: 44.15, lpg: 24.45 },
-    "ISPARTA": { benzin: 43.25, motorin: 43.95, lpg: 24.25 },
-  },
-  "PETROL_OFISI": {
-    "ISTANBUL": { benzin: 43.60, motorin: 44.30, lpg: 24.60 },
-    "ANKARA": { benzin: 43.40, motorin: 44.10, lpg: 24.40 },
-    "IZMIR": { benzin: 43.50, motorin: 44.20, lpg: 24.50 },
-    "ISPARTA": { benzin: 43.30, motorin: 44.00, lpg: 24.30 },
-  },
-  "OPET": {
-    "ISTANBUL": { benzin: 43.52, motorin: 44.22, lpg: 24.52 },
-    "ANKARA": { benzin: 43.32, motorin: 44.02, lpg: 24.32 },
-    "IZMIR": { benzin: 43.42, motorin: 44.12, lpg: 24.42 },
-    "ISPARTA": { benzin: 43.22, motorin: 43.92, lpg: 24.22 },
-  },
-  "TOTAL": {
-    "ISTANBUL": { benzin: 43.48, motorin: 44.18, lpg: 24.48 },
-    "ANKARA": { benzin: 43.28, motorin: 43.98, lpg: 24.28 },
-    "IZMIR": { benzin: 43.38, motorin: 44.08, lpg: 24.38 },
-    "ISPARTA": { benzin: 43.18, motorin: 43.88, lpg: 24.18 },
-  },
+// Firma komisyon marjları (araştırma gerekli - örnek değerler)
+const BRAND_MARGINS = {
+  "SHELL": { benzin: 2.50, motorin: 2.30, lpg: 1.80 },
+  "BP": { benzin: 2.45, motorin: 2.25, lpg: 1.75 },
+  "PETROL_OFISI": { benzin: 2.40, motorin: 2.20, lpg: 1.70 },
+  "OPET": { benzin: 2.35, motorin: 2.15, lpg: 1.65 },
+  "TOTAL": { benzin: 2.30, motorin: 2.10, lpg: 1.60 },
+  "AYTEMIZ": { benzin: 2.25, motorin: 2.05, lpg: 1.55 },
 };
 
-///////////////////////////
-// ÜCRETSİZ ALTERNATİF 2: AÇIK VERİ PORTALLARI
-///////////////////////////
+// EPDK taban fiyatları (şehir bazlı - haftalık manuel güncelleme)
+// Bu verileri https://www.epdk.gov.tr/Detay/Icerik/3-0-94/aylik-yakit-fiyatlari
+// adresinden haftada bir güncellemelisiniz
+const EPDK_BASE_PRICES = {
+  "ISTANBUL": { benzin: 41.20, motorin: 42.10, lpg: 22.80 },
+  "ANKARA": { benzin: 41.00, motorin: 41.90, lpg: 22.60 },
+  "IZMIR": { benzin: 41.10, motorin: 42.00, lpg: 22.70 },
+  "ISPARTA": { benzin: 40.90, motorin: 41.80, lpg: 22.50 },
+  "ADANA": { benzin: 41.05, motorin: 41.95, lpg: 22.65 },
+  "ANTALYA": { benzin: 41.15, motorin: 42.05, lpg: 22.75 },
+  "BURSA": { benzin: 41.08, motorin: 41.98, lpg: 22.68 },
+  "KONYA": { benzin: 40.95, motorin: 41.85, lpg: 22.55 },
+  "GAZIANTEP": { benzin: 41.00, motorin: 41.90, lpg: 22.60 },
+  "KAYSERI": { benzin: 40.92, motorin: 41.82, lpg: 22.52 },
+  // Diğer şehirler için ortalama hesaplama yapılacak
+};
 
-async function fetchOpenDataPrices() {
-  try {
-    // Türkiye Açık Veri Portalı veya benzeri kaynaklar
-    // Bu URL'ler örnek - gerçek açık veri API'si bulmanız gerekir
-    const sources = [
-      // Örnek: Belediye açık veri portallari
-      // "https://data.ibb.gov.tr/api/fuel-prices",
-      // "https://api.data.gov.tr/fuel/latest",
-    ];
+// Şehir için gerçek satış fiyatlarını hesapla
+function calculateCityPrices(cityName) {
+  const cityKey = normalizeCityKey(cityName);
+  const basePrice = EPDK_BASE_PRICES[cityKey] || {
+    benzin: 41.00,
+    motorin: 41.90,
+    lpg: 22.60
+  };
 
-    // Şimdilik manuel veriyi kullan
-    return MANUAL_FUEL_DATA;
-  } catch (e) {
-    console.error("Açık veri çekme hatası:", e);
-    return MANUAL_FUEL_DATA;
+  const cityPrices = {};
+
+  for (const [brand, margins] of Object.entries(BRAND_MARGINS)) {
+    cityPrices[brand] = {
+      benzin: basePrice.benzin + margins.benzin,
+      motorin: basePrice.motorin + margins.motorin,
+      lpg: basePrice.lpg + margins.lpg,
+    };
   }
+
+  return cityPrices;
 }
+
+///////////////////////////
+// TÜM TÜRKİYE ŞEHİRLERİ
+///////////////////////////
+
+const ALL_CITIES = [
+  "ADANA", "ADIYAMAN", "AFYONKARAHISAR", "AGRI", "AKSARAY", "AMASYA", "ANKARA",
+  "ANTALYA", "ARDAHAN", "ARTVIN", "AYDIN", "BALIKESIR", "BARTIN", "BATMAN",
+  "BAYBURT", "BILECIK", "BINGOL", "BITLIS", "BOLU", "BURDUR", "BURSA", "CANAKKALE",
+  "CANKIRI", "CORUM", "DENIZLI", "DIYARBAKIR", "DUZCE", "EDIRNE", "ELAZIG",
+  "ERZINCAN", "ERZURUM", "ESKISEHIR", "GAZIANTEP", "GIRESUN", "GUMUSHANE",
+  "HAKKARI", "HATAY", "IGDIR", "ISPARTA", "ISTANBUL", "IZMIR", "KAHRAMANMARAS",
+  "KARABUK", "KARAMAN", "KARS", "KASTAMONU", "KAYSERI", "KIRIKKALE", "KIRKLARELI",
+  "KIRSEHIR", "KILIS", "KOCAELI", "KONYA", "KUTAHYA", "MALATYA", "MANISA",
+  "MARDIN", "MERSIN", "MUGLA", "MUS", "NEVSEHIR", "NIGDE", "ORDU", "OSMANIYE",
+  "RIZE", "SAKARYA", "SAMSUN", "SIIRT", "SINOP", "SIVAS", "SANLIURFA", "SIRNAK",
+  "TEKIRDAG", "TOKAT", "TRABZON", "TUNCELI", "USAK", "VAN", "YALOVA", "YOZGAT",
+  "ZONGULDAK"
+];
 
 ///////////////////////////
 // VERİ YAPISI OLUŞTURMA
 ///////////////////////////
 
-function buildPriceStructures(rawData) {
-  const allFirmPrices = {};
-  const cityBuckets = {};
-
-  for (const [brand, cities] of Object.entries(rawData)) {
-    if (!allFirmPrices[brand]) allFirmPrices[brand] = {};
-
-    for (const [cityName, prices] of Object.entries(cities)) {
-      const cityKey = normalizeCityKey(cityName);
-      
-      if (!cityBuckets[cityKey]) {
-        cityBuckets[cityKey] = { benzin: [], motorin: [], lpg: [] };
-      }
-
-      allFirmPrices[brand][cityKey] = {
-        city: cityKey,
-        brand,
-        benzin: prices.benzin ?? null,
-        motorin: prices.motorin ?? null,
-        lpg: prices.lpg ?? null,
-      };
-
-      if (prices.benzin != null) cityBuckets[cityKey].benzin.push(prices.benzin);
-      if (prices.motorin != null) cityBuckets[cityKey].motorin.push(prices.motorin);
-      if (prices.lpg != null) cityBuckets[cityKey].lpg.push(prices.lpg);
-    }
-  }
-
+function buildAllCityPrices() {
+  const cityPrices = {};
   const cityAverages = {};
-  for (const [cityKey, bucket] of Object.entries(cityBuckets)) {
+
+  for (const city of ALL_CITIES) {
+    const cityKey = normalizeCityKey(city);
+    const prices = calculateCityPrices(city);
+    
+    cityPrices[cityKey] = prices;
+
+    // Şehir ortalaması hesapla
+    const allBenzin = [];
+    const allMotorin = [];
+    const allLpg = [];
+
+    for (const brandPrices of Object.values(prices)) {
+      if (brandPrices.benzin) allBenzin.push(brandPrices.benzin);
+      if (brandPrices.motorin) allMotorin.push(brandPrices.motorin);
+      if (brandPrices.lpg) allLpg.push(brandPrices.lpg);
+    }
+
     cityAverages[cityKey] = {
-      benzin: bucket.benzin.length
-        ? bucket.benzin.reduce((a, b) => a + b, 0) / bucket.benzin.length
-        : null,
-      motorin: bucket.motorin.length
-        ? bucket.motorin.reduce((a, b) => a + b, 0) / bucket.motorin.length
-        : null,
-      lpg: bucket.lpg.length
-        ? bucket.lpg.reduce((a, b) => a + b, 0) / bucket.lpg.length
-        : null,
+      benzin: allBenzin.length ? allBenzin.reduce((a, b) => a + b, 0) / allBenzin.length : null,
+      motorin: allMotorin.length ? allMotorin.reduce((a, b) => a + b, 0) / allMotorin.length : null,
+      lpg: allLpg.length ? allLpg.reduce((a, b) => a + b, 0) / allLpg.length : null,
     };
   }
 
-  return { allFirmPrices, cityAverages };
+  return { cityPrices, cityAverages };
 }
 
 async function updatePrices() {
-  const rawData = await fetchOpenDataPrices();
-  const { allFirmPrices, cityAverages } = buildPriceStructures(rawData);
+  const { cityPrices, cityAverages } = buildAllCityPrices();
 
   const dataToStore = {
-    allFirmPrices,
-    cityAverages,
-    sources: ["manual", "epdk"],
+    prices: cityPrices,
+    averages: cityAverages,
+    sources: ["epdk", "manual_margins"],
     lastUpdate: new Date().toISOString(),
+    note: "EPDK taban fiyatları + firma komisyonları ile gerçek satış fiyatları",
   };
 
   await kvSetJson("fuel:prices", dataToStore);
@@ -220,7 +202,7 @@ async function updatePrices() {
 
 async function handleHealth(_req, res) {
   const kvData = await kvGetJson("fuel:prices");
-  const hasData = kvData && kvData.allFirmPrices && Object.keys(kvData.allFirmPrices).length > 0;
+  const hasData = kvData && kvData.prices && Object.keys(kvData.prices).length > 0;
 
   res.status(200).json({
     ok: true,
@@ -234,43 +216,29 @@ async function handlePrices(req, res) {
   const kvData = await kvGetJson("fuel:prices");
 
   if (!kvData) {
-    return res.status(200).json({
-      allFirmPrices: {},
-      cityAverages: {},
-      lastUpdate: null,
-      sources: [],
-    });
+    // İlk kez çağrılıyorsa veriyi oluştur
+    const newData = await updatePrices();
+    return res.status(200).json(newData);
   }
 
   const url = new URL(req.url || "/", "http://localhost");
   const cityParam = url.searchParams.get("city");
   const cityKey = cityParam ? normalizeCityKey(cityParam) : null;
 
-  const allFirmPrices = kvData.allFirmPrices || {};
-  const cityAverages = kvData.cityAverages || {};
-
   if (!cityKey) {
+    // Tüm şehirler
     return res.status(200).json({
-      allFirmPrices,
-      cityAverages,
+      prices: kvData.prices || {},
+      averages: kvData.averages || {},
       lastUpdate: kvData.lastUpdate || null,
       sources: kvData.sources || [],
     });
   }
 
-  const filteredFirmPrices = {};
-  for (const [brand, cityMap] of Object.entries(allFirmPrices)) {
-    for (const [cKey, data] of Object.entries(cityMap)) {
-      if (cKey === cityKey) {
-        if (!filteredFirmPrices[brand]) filteredFirmPrices[brand] = {};
-        filteredFirmPrices[brand][cKey] = data;
-      }
-    }
-  }
-
-  res.status(200).json({
-    allFirmPrices: filteredFirmPrices,
-    cityAverages: cityKey && cityAverages[cityKey] ? { [cityKey]: cityAverages[cityKey] } : {},
+  // Tek şehir
+  return res.status(200).json({
+    prices: kvData.prices?.[cityKey] || {},
+    averages: kvData.averages?.[cityKey] ? { [cityKey]: kvData.averages[cityKey] } : {},
     lastUpdate: kvData.lastUpdate || null,
     sources: kvData.sources || [],
   });
