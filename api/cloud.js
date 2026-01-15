@@ -1,267 +1,151 @@
-// api/cloud.js
-// Aytemiz arşiv: benzin+motorin+LPG (il merkezleri)
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 
-const MAX_AGE_HOURS = 12;
-
-async function redisCmd(args) {
-  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_KV_REST_API_TOKEN;
-  if (!url || !token) return { ok: false, result: null, error: "KV env missing" };
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(args),
-    });
-    if (!response.ok) return { ok: false, result: null, error: `KV HTTP ${response.status}` };
-    const json = await response.json().catch(() => null);
-    if (!json) return { ok: false, result: null, error: "KV bad json" };
-    if (json.error) return { ok: false, result: null, error: String(json.error) };
-    return { ok: true, result: json.result, error: null };
-  } catch (e) {
-    return { ok: false, result: null, error: String(e.message || e) };
-  }
-}
-
-async function kvGetJson(key) {
-  const { ok, result } = await redisCmd(["GET", key]);
-  if (!ok || result == null || typeof result !== "string") return null;
-  try { return JSON.parse(result); } catch { return null; }
-}
-
-async function kvSetJson(key, value) {
-  const { ok } = await redisCmd(["SET", key, JSON.stringify(value)]);
-  return ok;
-}
-
-function normalizeCityKey(input) {
-  if (!input) return "";
-  return String(input)
-    .trim()
-    .toUpperCase()
-    .replace(/İ/g, "I")
-    .replace(/Ğ/g, "G")
-    .replace(/Ü/g, "U")
-    .replace(/Ş/g, "S")
-    .replace(/Ö/g, "O")
-    .replace(/Ç/g, "C")
-    .replace(/[^A-Z0-9\s()/-]/g, "")
-    .replace(/\s+/g, "_");
-}
-
-function parseTrNumber(s) {
-  if (s == null) return null;
-  const txt = String(s).replace(/\s+/g, "").trim();
-  const m = txt.match(/(\d{1,3}(?:[.,]\d{1,2})?)/);
-  if (!m) return null;
-  const v = Number(m[1].replace(",", "."));
-  return Number.isFinite(v) && v > 0 ? v : null;
-}
-
-function hoursSince(iso) {
-  if (!iso) return Infinity;
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? (Date.now() - t) / 36e5 : Infinity;
-}
-
-function ensure(obj, k, init) {
-  if (!obj[k]) obj[k] = init;
-  return obj[k];
-}
-
-// Aytemiz arşiv POST
-async function fetchAytemizArchive(fuelType) {
-  const today = new Date();
-  const day = String(today.getDate()).padStart(2, "0");
-  const month = String(today.getMonth() + 1).padStart(2, "0");
-  const year = today.getFullYear();
-  const dateStr = `${day}.${month}.${year}`;
-
-  const formData = new URLSearchParams({
-    "ctl00$ContentPlaceHolder1$C002$txtDate": dateStr,
-    "ctl00$ContentPlaceHolder1$C002$selCities": "0", // tüm iller
-    "ctl00$ContentPlaceHolder1$C002$rblFuelType": String(fuelType), // 1=akaryakıt, 2=LPG
-  });
-
-  const res = await fetch("https://www.aytemiz.com.tr/akaryakit-fiyatlari/arsiv-fiyat-listesi", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "Mozilla/5.0",
-    },
-    body: formData.toString(),
-  });
-
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return await res.text();
-}
+const CITIES = [
+  'ADANA', 'ADIYAMAN', 'AFYON', 'AGRI', 'AKSARAY', 'AMASYA', 'ANKARA', 'ANTALYA',
+  'ARDAHAN', 'ARTVIN', 'AYDIN', 'BALIKESIR', 'BARTIN', 'BATMAN', 'BAYBURT',
+  'BILECIK', 'BINGOL', 'BITLIS', 'BOLU', 'BURDUR', 'BURSA', 'CANAKKALE',
+  'CANKIRI', 'CORUM', 'DENIZLI', 'DIYARBAKIR', 'DUZCE', 'EDIRNE', 'ELAZIG',
+  'ERZINCAN', 'ERZURUM', 'ESKISEHIR', 'GAZIANTEP', 'GIRESUN', 'GUMUSHANE',
+  'HAKKARI', 'HATAY', 'IGDIR', 'ISPARTA', 'ISTANBUL', 'IZMIR', 'K.MARAS',
+  'KARABUK', 'KARAMAN', 'KARS', 'KASTAMONU', 'KAYSERI', 'KILIS', 'KIRIKKALE',
+  'KIRKLARELI', 'KIRSEHIR', 'KOCAELI', 'KONYA', 'KUTAHYA', 'MALATYA', 'MANISA',
+  'MARDIN', 'MERSIN', 'MUGLA', 'MUS', 'NEVSEHIR', 'NIGDE', 'ORDU', 'OSMANIYE',
+  'RIZE', 'SAKARYA', 'SAMSUN', 'SANLIURFA', 'SIIRT', 'SINOP', 'SIRNAK', 'SIVAS',
+  'TEKIRDAG', 'TOKAT', 'TRABZON', 'TUNCELI', 'USAK', 'VAN', 'YALOVA', 'YOZGAT',
+  'ZONGULDAK'
+];
 
 async function scrapeAytemiz() {
-  const out = {};
-
-  // 1) Akaryakıt (benzin + motorin)
-  const htmlFuel = await fetchAytemizArchive(1);
-  const linesFuel = htmlFuel.split("\n");
-
-  for (const line of linesFuel) {
-    if (!line.includes("<td")) continue;
-    const cells = line.match(/<td[^>]*>(.*?)<\/td>/gi);
-    if (!cells || cells.length < 4) continue;
-
-    const cityRaw = cells[0]?.replace(/<[^>]+>/g, "").trim();
-    const benzinRaw = cells[1]?.replace(/<[^>]+>/g, "").trim();
-    const motorinRaw = cells[3]?.replace(/<[^>]+>/g, "").trim();
-
-    const cityKey = normalizeCityKey(cityRaw);
-    if (!cityKey) continue;
-
-    const benzin = parseTrNumber(benzinRaw);
-    const motorin = parseTrNumber(motorinRaw);
-
-    if (benzin == null || motorin == null) continue;
-
-    out[cityKey] = { benzin, motorin, lpg: null };
-  }
-
-  // 2) LPG
-  const htmlLpg = await fetchAytemizArchive(2);
-  const linesLpg = htmlLpg.split("\n");
-
-  for (const line of linesLpg) {
-    if (!line.includes("<td")) continue;
-    const cells = line.match(/<td[^>]*>(.*?)<\/td>/gi);
-    if (!cells || cells.length < 2) continue;
-
-    const cityRaw = cells[0]?.replace(/<[^>]+>/g, "").trim();
-    const lpgRaw = cells[1]?.replace(/<[^>]+>/g, "").trim();
-
-    const cityKey = normalizeCityKey(cityRaw);
-    if (!cityKey) continue;
-
-    const lpg = parseTrNumber(lpgRaw);
-    if (lpg == null) continue;
-
-    if (!out[cityKey]) out[cityKey] = { benzin: null, motorin: null, lpg: null };
-    out[cityKey].lpg = lpg;
-  }
-
-  if (Object.keys(out).length < 10) {
-    throw new Error(`Aytemiz: sadece ${Object.keys(out).length} il bulundu`);
-  }
-
-  return { brandKey: "AYTEMIZ", sourceUrl: "https://www.aytemiz.com.tr/akaryakit-fiyatlari/arsiv-fiyat-listesi", data: out };
-}
-
-function merge(prices, brandKey, cityMap, meta) {
-  const byBrand = ensure(prices, brandKey, {});
-  for (const [cityKey, v] of Object.entries(cityMap || {})) {
-    byBrand[cityKey] = {
-      benzin: v.benzin ?? null,
-      motorin: v.motorin ?? null,
-      lpg: v.lpg ?? null,
-      source: meta?.sourceUrl || null,
-      fetchedAt: meta?.fetchedAt || null,
-    };
-  }
-}
-
-function buildAverages(prices) {
-  const sums = {};
-  for (const brandKey of Object.keys(prices || {})) {
-    for (const [cityKey, p] of Object.entries(prices[brandKey] || {})) {
-      const s = ensure(sums, cityKey, { bS: 0, bN: 0, mS: 0, mN: 0, lS: 0, lN: 0 });
-      if (typeof p.benzin === "number") { s.bS += p.benzin; s.bN++; }
-      if (typeof p.motorin === "number") { s.mS += p.motorin; s.mN++; }
-      if (typeof p.lpg === "number") { s.lS += p.lpg; s.lN++; }
-    }
-  }
-  const avg = {};
-  for (const [cityKey, s] of Object.entries(sums)) {
-    avg[cityKey] = {
-      benzin: s.bN ? Number((s.bS / s.bN).toFixed(2)) : null,
-      motorin: s.mN ? Number((s.mS / s.mN).toFixed(2)) : null,
-      lpg: s.lN ? Number((s.lS / s.lN).toFixed(2)) : null,
-    };
-  }
-  return avg;
-}
-
-async function updatePrices() {
-  const fetchedAt = new Date().toISOString();
   const prices = {};
-  const sources = [];
-
+  const errors = [];
+  
   try {
-    const ay = await scrapeAytemiz();
-    merge(prices, ay.brandKey, ay.data, { sourceUrl: ay.sourceUrl, fetchedAt });
-    sources.push({ brand: ay.brandKey, ok: true, url: ay.sourceUrl, cityCount: Object.keys(ay.data).length });
-  } catch (e) {
-    sources.push({ brand: "AYTEMIZ", ok: false, error: String(e.message || e) });
-  }
-
-  const dataToStore = {
-    prices,
-    averages: buildAverages(prices),
-    sources,
-    lastUpdate: fetchedAt,
-    note: "Aytemiz arşiv (benzin+motorin+LPG il merkezleri)",
-  };
-
-  await kvSetJson("fuel:prices", dataToStore);
-  return dataToStore;
-}
-
-async function handleHealth(_req, res) {
-  const kvData = await kvGetJson("fuel:prices");
-  res.status(200).json({
-    ok: true,
-    hasData: !!(kvData?.prices && Object.keys(kvData.prices).length),
-    lastUpdate: kvData?.lastUpdate || null,
-    sources: kvData?.sources || [],
-  });
-}
-
-async function handlePrices(req, res) {
-  let kvData = await kvGetJson("fuel:prices");
-  if (!kvData) kvData = await updatePrices();
-  if (hoursSince(kvData?.lastUpdate) > MAX_AGE_HOURS) updatePrices().catch(() => null);
-
-  const url = new URL(req.url || "/", "http://localhost");
-  const cityParam = url.searchParams.get("city");
-  const brandParam = url.searchParams.get("brand");
-  const cityKey = cityParam ? normalizeCityKey(cityParam) : null;
-  const brandKey = brandParam ? normalizeCityKey(brandParam) : null;
-
-  if (!cityKey && !brandKey) return res.status(200).json(kvData);
-  if (brandKey && !cityKey) return res.status(200).json({ ...kvData, prices: { [brandKey]: kvData.prices?.[brandKey] || {} } });
-
-  if (cityKey && !brandKey) {
-    const byBrand = {};
-    for (const bk of Object.keys(kvData.prices || {})) {
-      if (kvData.prices?.[bk]?.[cityKey]) byBrand[bk] = { [cityKey]: kvData.prices[bk][cityKey] };
+    // İlk olarak en son tarihi almak için bir sorgu yap
+    const initResponse = await axios.get('https://www.aytemiz.com.tr/akaryakit-fiyatlari/arsiv-fiyat-listesi', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 10000
+    });
+    
+    const $init = cheerio.load(initResponse.data);
+    const latestDate = $init('#ContentPlaceHolder1_C002_ddlLpg option').first().attr('value');
+    
+    if (!latestDate) {
+      throw new Error('Tarih bulunamadı');
     }
-    return res.status(200).json({ ...kvData, prices: byBrand, averages: kvData.averages?.[cityKey] ? { [cityKey]: kvData.averages[cityKey] } : {} });
+
+    // Her şehir için fiyatları çek
+    for (const city of CITIES) {
+      try {
+        // Benzin/Motorin fiyatları
+        const fuelResponse = await axios.post('https://www.aytemiz.com.tr/akaryakit-fiyatlari/arsiv-fiyat-listesi', 
+          `ContentPlaceHolder1_C002_rdbPriceType=0&ContentPlaceHolder1_C002_ddlLpg=${latestDate}&ContentPlaceHolder1_C002_selCities=${city}&ContentPlaceHolder1_C002_btnSorgula=Sorgula`,
+          {
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 10000
+          }
+        );
+
+        // LPG fiyatları
+        const lpgResponse = await axios.post('https://www.aytemiz.com.tr/akaryakit-fiyatlari/arsiv-fiyat-listesi',
+          `ContentPlaceHolder1_C002_rdbPriceType=1&ContentPlaceHolder1_C002_ddlLpg=${latestDate}&ContentPlaceHolder1_C002_selCities=${city}&ContentPlaceHolder1_C002_btnSorgula=Sorgula`,
+          {
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 10000
+          }
+        );
+
+        // Parse fuel prices
+        const $fuel = cheerio.load(fuelResponse.data);
+        const fuelRows = $fuel('#ContentPlaceHolder1_C002_gvList tr').slice(1); // İlk satır header
+        
+        let benzinSum = 0, motorinSum = 0, count = 0;
+        
+        fuelRows.each((i, row) => {
+          const cols = $fuel(row).find('td');
+          if (cols.length >= 3) {
+            const benzin = parseFloat($fuel(cols.eq(1)).text().trim().replace(',', '.'));
+            const motorin = parseFloat($fuel(cols.eq(2)).text().trim().replace(',', '.'));
+            if (!isNaN(benzin) && !isNaN(motorin)) {
+              benzinSum += benzin;
+              motorinSum += motorin;
+              count++;
+            }
+          }
+        });
+
+        // Parse LPG prices
+        const $lpg = cheerio.load(lpgResponse.data);
+        const lpgRows = $lpg('#ContentPlaceHolder1_C002_gvList tr').slice(1);
+        
+        let lpgSum = 0, lpgCount = 0;
+        
+        lpgRows.each((i, row) => {
+          const cols = $lpg(row).find('td');
+          if (cols.length >= 2) {
+            const lpg = parseFloat($lpg(cols.eq(1)).text().trim().replace(',', '.'));
+            if (!isNaN(lpg)) {
+              lpgSum += lpg;
+              lpgCount++;
+            }
+          }
+        });
+
+        // Ortalama fiyatları kaydet
+        if (count > 0 && lpgCount > 0) {
+          prices[city] = {
+            benzin: (benzinSum / count).toFixed(2),
+            motorin: (motorinSum / count).toFixed(2),
+            lpg: (lpgSum / lpgCount).toFixed(2)
+          };
+        }
+
+        // Rate limiting
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+      } catch (cityError) {
+        errors.push(`${city}: ${cityError.message}`);
+      }
+    }
+
+  } catch (error) {
+    return { ok: false, error: error.message, prices: {}, cityCount: 0 };
   }
 
-  return res.status(200).json({
-    ...kvData,
-    prices: { [brandKey]: { [cityKey]: kvData.prices?.[brandKey]?.[cityKey] || {} } },
-    averages: kvData.averages?.[cityKey] ? { [cityKey]: kvData.averages[cityKey] } : {},
-  });
+  return {
+    ok: Object.keys(prices).length > 0,
+    prices,
+    cityCount: Object.keys(prices).length,
+    errors: errors.length > 0 ? errors.slice(0, 5) : undefined,
+    date: new Date().toISOString()
+  };
 }
 
-async function handleUpdate(_req, res) {
-  const result = await updatePrices();
-  res.status(200).json({ ok: true, ...result });
+export default async function handler(req, res) {
+  if (req.method === 'GET') {
+    // Mevcut fiyatları getir
+    // Burada cache/database'den fiyatları döndürürsün
+    res.status(200).json({ message: 'Price API ready' });
+  } else if (req.method === 'POST' && req.query.action === 'update') {
+    // Manuel güncelleme tetikle
+    const aytemizData = await scrapeAytemiz();
+    
+    res.status(200).json({
+      sources: {
+        aytemiz: aytemizData
+      },
+      totalCities: aytemizData.cityCount,
+      lastUpdate: new Date().toISOString()
+    });
+  } else {
+    res.status(405).json({ error: 'Method not allowed' });
+  }
 }
-
-module.exports = async (req, res) => {
-  res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate");
-  const url = new URL(req.url || "/", "http://localhost");
-  const p = url.pathname;
-
-  if (p.endsWith("/health")) return handleHealth(req, res);
-  if (p.endsWith("/update")) return handleUpdate(req, res);
-  return handlePrices(req, res);
-};
