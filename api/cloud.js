@@ -1,6 +1,5 @@
 // api/cloud.js
-// Pompa fiyatları (KV + cron)
-// AKTİF: Aytemiz (markdown tablo)
+// Aytemiz arşiv: benzin+motorin+LPG (il merkezleri)
 
 const MAX_AGE_HOURS = 12;
 
@@ -28,11 +27,7 @@ async function redisCmd(args) {
 async function kvGetJson(key) {
   const { ok, result } = await redisCmd(["GET", key]);
   if (!ok || result == null || typeof result !== "string") return null;
-  try {
-    return JSON.parse(result);
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(result); } catch { return null; }
 }
 
 async function kvSetJson(key, value) {
@@ -61,7 +56,7 @@ function parseTrNumber(s) {
   const m = txt.match(/(\d{1,3}(?:[.,]\d{1,2})?)/);
   if (!m) return null;
   const v = Number(m[1].replace(",", "."));
-  return Number.isFinite(v) ? v : null;
+  return Number.isFinite(v) && v > 0 ? v : null;
 }
 
 function hoursSince(iso) {
@@ -75,65 +70,87 @@ function ensure(obj, k, init) {
   return obj[k];
 }
 
-async function fetchHtml(url) {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; fiyat-cepte/1.0)",
-      Accept: "text/html",
-    },
+// Aytemiz arşiv POST
+async function fetchAytemizArchive(fuelType) {
+  const today = new Date();
+  const day = String(today.getDate()).padStart(2, "0");
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const year = today.getFullYear();
+  const dateStr = `${day}.${month}.${year}`;
+
+  const formData = new URLSearchParams({
+    "ctl00$ContentPlaceHolder1$C002$txtDate": dateStr,
+    "ctl00$ContentPlaceHolder1$C002$selCities": "0", // tüm iller
+    "ctl00$ContentPlaceHolder1$C002$rblFuelType": String(fuelType), // 1=akaryakıt, 2=LPG
   });
+
+  const res = await fetch("https://www.aytemiz.com.tr/akaryakit-fiyatlari/arsiv-fiyat-listesi", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "Mozilla/5.0",
+    },
+    body: formData.toString(),
+  });
+
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.text();
 }
 
 async function scrapeAytemiz() {
-  const url = "https://www.aytemiz.com.tr/akaryakit-fiyatlari/benzin-fiyatlari";
-  const html = await fetchHtml(url);
   const out = {};
-  const lines = html.split("\n");
 
-  let headerIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (line.includes("| İl |") && line.includes("Benzin") && line.includes("Motorin")) {
-      headerIdx = i;
-      break;
-    }
-  }
+  // 1) Akaryakıt (benzin + motorin)
+  const htmlFuel = await fetchAytemizArchive(1);
+  const linesFuel = htmlFuel.split("\n");
 
-  if (headerIdx === -1) throw new Error("Aytemiz: header not found");
+  for (const line of linesFuel) {
+    if (!line.includes("<td")) continue;
+    const cells = line.match(/<td[^>]*>(.*?)<\/td>/gi);
+    if (!cells || cells.length < 4) continue;
 
-  for (let i = headerIdx + 2; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line.startsWith("|") || line.includes("---")) continue;
+    const cityRaw = cells[0]?.replace(/<[^>]+>/g, "").trim();
+    const benzinRaw = cells[1]?.replace(/<[^>]+>/g, "").trim();
+    const motorinRaw = cells[3]?.replace(/<[^>]+>/g, "").trim();
 
-    const cols = line
-      .replace(/^\|/, "")
-      .replace(/\|$/, "")
-      .split("|")
-      .map((c) => c.trim());
-
-    if (cols.length < 3) continue;
-
-    const cityRaw = cols[0];
     const cityKey = normalizeCityKey(cityRaw);
     if (!cityKey) continue;
 
-    const benzin = parseTrNumber(cols[1]);
-    const motorin = parseTrNumber(cols[2]);
+    const benzin = parseTrNumber(benzinRaw);
+    const motorin = parseTrNumber(motorinRaw);
 
-    out[cityKey] = { benzin: benzin ?? null, motorin: motorin ?? null, lpg: null };
+    if (benzin == null || motorin == null) continue;
+
+    out[cityKey] = { benzin, motorin, lpg: null };
   }
 
-  const istA = out["ISTANBUL_AVRUPA"];
-  const istB = out["ISTANBUL_ANADOLU"];
-  if (istA && istB) {
-    const avg = (a, b) =>
-      typeof a === "number" && typeof b === "number" ? Number(((a + b) / 2).toFixed(2)) : null;
-    out["ISTANBUL"] = { benzin: avg(istA.benzin, istB.benzin), motorin: avg(istA.motorin, istB.motorin), lpg: null };
+  // 2) LPG
+  const htmlLpg = await fetchAytemizArchive(2);
+  const linesLpg = htmlLpg.split("\n");
+
+  for (const line of linesLpg) {
+    if (!line.includes("<td")) continue;
+    const cells = line.match(/<td[^>]*>(.*?)<\/td>/gi);
+    if (!cells || cells.length < 2) continue;
+
+    const cityRaw = cells[0]?.replace(/<[^>]+>/g, "").trim();
+    const lpgRaw = cells[1]?.replace(/<[^>]+>/g, "").trim();
+
+    const cityKey = normalizeCityKey(cityRaw);
+    if (!cityKey) continue;
+
+    const lpg = parseTrNumber(lpgRaw);
+    if (lpg == null) continue;
+
+    if (!out[cityKey]) out[cityKey] = { benzin: null, motorin: null, lpg: null };
+    out[cityKey].lpg = lpg;
   }
 
-  return { brandKey: "AYTEMIZ", sourceUrl: url, data: out };
+  if (Object.keys(out).length < 10) {
+    throw new Error(`Aytemiz: sadece ${Object.keys(out).length} il bulundu`);
+  }
+
+  return { brandKey: "AYTEMIZ", sourceUrl: "https://www.aytemiz.com.tr/akaryakit-fiyatlari/arsiv-fiyat-listesi", data: out };
 }
 
 function merge(prices, brandKey, cityMap, meta) {
@@ -188,7 +205,7 @@ async function updatePrices() {
     averages: buildAverages(prices),
     sources,
     lastUpdate: fetchedAt,
-    note: "Aytemiz il tablosu (markdown parse)",
+    note: "Aytemiz arşiv (benzin+motorin+LPG il merkezleri)",
   };
 
   await kvSetJson("fuel:prices", dataToStore);
@@ -217,21 +234,14 @@ async function handlePrices(req, res) {
   const brandKey = brandParam ? normalizeCityKey(brandParam) : null;
 
   if (!cityKey && !brandKey) return res.status(200).json(kvData);
-
-  if (brandKey && !cityKey) {
-    return res.status(200).json({ ...kvData, prices: { [brandKey]: kvData.prices?.[brandKey] || {} } });
-  }
+  if (brandKey && !cityKey) return res.status(200).json({ ...kvData, prices: { [brandKey]: kvData.prices?.[brandKey] || {} } });
 
   if (cityKey && !brandKey) {
     const byBrand = {};
     for (const bk of Object.keys(kvData.prices || {})) {
       if (kvData.prices?.[bk]?.[cityKey]) byBrand[bk] = { [cityKey]: kvData.prices[bk][cityKey] };
     }
-    return res.status(200).json({
-      ...kvData,
-      prices: byBrand,
-      averages: kvData.averages?.[cityKey] ? { [cityKey]: kvData.averages[cityKey] } : {},
-    });
+    return res.status(200).json({ ...kvData, prices: byBrand, averages: kvData.averages?.[cityKey] ? { [cityKey]: kvData.averages[cityKey] } : {} });
   }
 
   return res.status(200).json({
