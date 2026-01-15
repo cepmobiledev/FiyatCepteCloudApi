@@ -1,7 +1,7 @@
 // api/cloud.js
-// Canlı pompa fiyatları (KV cache + cron uyumlu)
-// Kaynaklar: Petrol Ofisi (il tablosu) + Aytemiz (il tablosu)
-// Çıktı: prices[BRAND_KEY][CITY_KEY] => { benzin, motorin, lpg, source, fetchedAt }
+// Pompa fiyatları (KV cache + cron uyumlu)
+// ŞU AN AKTİF: Aytemiz (statik HTML parse)
+// DEVRE DIŞI: Petrol Ofisi (JS render, JSON endpoint bulmak gerek), Shell
 
 const MAX_AGE_HOURS = 12;
 
@@ -68,9 +68,10 @@ function normalizeCityKey(input) {
 function parseTrNumber(s) {
   if (s == null) return null;
   const txt = String(s).replace(/\s+/g, " ").trim();
+  // "55,12" veya "55.12 TL/LT" gibi
   const m = txt.match(/(\d{1,3}(?:[.,]\d{1,2})?)/);
   if (!m) return null;
-  const num = m[1].replace(/\./g, "").replace(",", ".");
+  const num = m[1].replace(",", ".");
   const v = Number(num);
   return Number.isFinite(v) ? v : null;
 }
@@ -92,105 +93,23 @@ async function fetchHtml(url) {
     method: "GET",
     headers: {
       "User-Agent": "Mozilla/5.0 (compatible; fiyat-cepte/1.0; +https://vercel.com/)",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
   return await res.text();
 }
 
-function splitMarkdownRow(rowLine) {
-  return rowLine
-    .trim()
-    .replace(/^\|/, "")
-    .replace(/\|$/, "")
-    .split("|")
-    .map((c) => c.trim());
-}
-
-function average2(a, b) {
-  if (typeof a !== "number" || typeof b !== "number") return null;
-  return Number(((a + b) / 2).toFixed(2));
-}
-
 ///////////////////////////
 // Scrapers
 ///////////////////////////
-async function scrapePetrolOfisi() {
-  const url = "https://www.petrolofisi.com.tr/akaryakit-fiyatlari";
-  const html = await fetchHtml(url);
 
-  // Petrol Ofisi sayfasında tablo satırları çoğu ortamda "|" ile markdown gibi görünüyor. [page:1]
-  // Header: | Şehir | V/Max Kurşunsuz 95 | V/Max Diesel | Gazyağı | Kalorifer Yakıtı | Fuel Oil | PO/gaz Otogaz |
-  const lines = String(html).split("\n").map((l) => l.trim());
-
-  const headerIdx = lines.findIndex(
-    (l) =>
-      l.startsWith("| Şehir |") &&
-      l.includes("V/Max Kurşunsuz 95") &&
-      l.includes("V/Max Diesel") &&
-      l.includes("PO/gaz Otogaz")
-  );
-
-  if (headerIdx === -1) {
-    // Fallback: tablo markdown formatında bulunamazsa hata verelim (yanlış parse etmesin)
-    throw new Error("PO table not found (layout changed?)");
-  }
-
-  const startIdx = headerIdx + 2; // header + separator sonrası
-
-  const out = {}; // CITY_KEY -> { benzin, motorin, lpg }
-  for (let i = startIdx; i < lines.length; i++) {
-    const row = lines[i];
-    if (!row.startsWith("|")) break;
-    if (row.includes("---")) continue;
-
-    const cols = splitMarkdownRow(row);
-    if (cols.length < 7) continue;
-
-    const cityRaw = cols[0];
-    const cityKey = normalizeCityKey(cityRaw);
-    if (!cityKey) continue;
-
-    // Sütunlar (sabit):
-    // 0: Şehir
-    // 1: V/Max Kurşunsuz 95  => benzin
-    // 2: V/Max Diesel        => motorin
-    // 3: Gazyağı
-    // 4: Kalorifer Yakıtı
-    // 5: Fuel Oil
-    // 6: PO/gaz Otogaz       => lpg
-    const benzin = parseTrNumber(cols[1]);
-    const motorin = parseTrNumber(cols[2]);
-    const lpg = parseTrNumber(cols[6]);
-
-    out[cityKey] = {
-      benzin: benzin ?? null,
-      motorin: motorin ?? null,
-      lpg: lpg ?? null,
-    };
-  }
-
-  // İstanbul (Avrupa/Anadolu) birleşsin: tek "ISTANBUL" olarak ortalama al. [page:1]
-  const istAvrupa = out["ISTANBUL_(AVRUPA)"];
-  const istAnadolu = out["ISTANBUL_(ANADOLU)"];
-  if (istAvrupa && istAnadolu) {
-    out["ISTANBUL"] = {
-      benzin: average2(istAvrupa.benzin, istAnadolu.benzin),
-      motorin: average2(istAvrupa.motorin, istAnadolu.motorin),
-      lpg: average2(istAvrupa.lpg, istAnadolu.lpg),
-    };
-  }
-
-  return { brandKey: "PETROL_OFISI", sourceUrl: url, data: out };
-}
-
+// ✅ AKTİF: AYTEMIZ (statik HTML)
 async function scrapeAytemiz() {
   const url = "https://www.aytemiz.com.tr/akaryakit-fiyatlari/benzin-fiyatlari";
   const html = await fetchHtml(url);
 
-  // Aytemiz sayfası HTML; çoğu zaman il satırlarında sayılar var. [web:35]
-  const out = {};
+  const out = {}; // CITY_KEY -> { benzin, motorin, lpg }
   const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let m;
 
@@ -202,6 +121,7 @@ async function scrapeAytemiz() {
       .replace(/\s+/g, " ")
       .trim();
 
+    // Tabloda şehir + sayılar var
     const nums = cellText.match(/(\d{1,3}(?:[.,]\d{1,2})?)/g);
     if (!nums || nums.length < 2) continue;
 
@@ -213,15 +133,50 @@ async function scrapeAytemiz() {
     const cityKey = normalizeCityKey(cityRaw);
     if (!cityKey) continue;
 
+    // Aytemiz tablosunda: İl | Benzin | Motorin | Motorin(Optimum) | Kalorifer | Fuel Oil
+    // Benzin = nums[0], Motorin = nums[1]
     const benzin = parseTrNumber(nums[0]);
     const motorin = parseTrNumber(nums[1]);
 
-    // Aytemiz sayfasında LPG her zaman bu tabloda olmayabilir; null bırak.
-    out[cityKey] = { benzin: benzin ?? null, motorin: motorin ?? null, lpg: null };
+    out[cityKey] = {
+      benzin: benzin ?? null,
+      motorin: motorin ?? null,
+      lpg: null, // Aytemiz bu tabloda LPG vermiyor
+    };
+  }
+
+  // İstanbul için Avrupa/Anadolu ayrımı varsa birleştir
+  const istAvrupa = out["ISTANBUL_AVRUPA"];
+  const istAnadolu = out["ISTANBUL_ANADOLU"];
+  if (istAvrupa && istAnadolu) {
+    const avg = (a, b) => (typeof a === "number" && typeof b === "number" ? Number(((a + b) / 2).toFixed(2)) : null);
+    out["ISTANBUL"] = {
+      benzin: avg(istAvrupa.benzin, istAnadolu.benzin),
+      motorin: avg(istAvrupa.motorin, istAnadolu.motorin),
+      lpg: null,
+    };
   }
 
   return { brandKey: "AYTEMIZ", sourceUrl: url, data: out };
 }
+
+// ❌ DEVRE DIŞI: PETROL OFİSİ (JS render; JSON endpoint lazım)
+/*
+async function scrapePetrolOfisi() {
+  // Bu fonksiyon şu an çalışmaz; Petrol Ofisi sayfası JS render ediyor.
+  // İlerde JSON API bulunca aktif edelim.
+  const url = "https://www.petrolofisi.com.tr/akaryakit-fiyatlari";
+  throw new Error("PO: JS render (devre dışı)");
+}
+*/
+
+// ❌ DEVRE DIŞI: SHELL (benzer durum; önce sayfayı kontrol etmek gerek)
+/*
+async function scrapeShell() {
+  const url = "https://www.shell.com.tr/motoristler/shell-istasyonlari/akaryakit-fiyatlari.html";
+  throw new Error("Shell: henüz implemente edilmedi");
+}
+*/
 
 ///////////////////////////
 // Build / Cache
@@ -244,9 +199,18 @@ function buildAverages(prices) {
   for (const brandKey of Object.keys(prices || {})) {
     for (const [cityKey, p] of Object.entries(prices[brandKey] || {})) {
       const s = ensure(sums, cityKey, { bS: 0, bN: 0, mS: 0, mN: 0, lS: 0, lN: 0 });
-      if (typeof p.benzin === "number") { s.bS += p.benzin; s.bN++; }
-      if (typeof p.motorin === "number") { s.mS += p.motorin; s.mN++; }
-      if (typeof p.lpg === "number") { s.lS += p.lpg; s.lN++; }
+      if (typeof p.benzin === "number") {
+        s.bS += p.benzin;
+        s.bN++;
+      }
+      if (typeof p.motorin === "number") {
+        s.mS += p.motorin;
+        s.mN++;
+      }
+      if (typeof p.lpg === "number") {
+        s.lS += p.lpg;
+        s.lN++;
+      }
     }
   }
   const avg = {};
@@ -265,14 +229,7 @@ async function updatePrices() {
   const prices = {};
   const sources = [];
 
-  try {
-    const po = await scrapePetrolOfisi();
-    merge(prices, po.brandKey, po.data, { sourceUrl: po.sourceUrl, fetchedAt });
-    sources.push({ brand: po.brandKey, ok: true, url: po.sourceUrl });
-  } catch (e) {
-    sources.push({ brand: "PETROL_OFISI", ok: false, error: String(e.message || e) });
-  }
-
+  // ✅ Aytemiz (aktif)
   try {
     const ay = await scrapeAytemiz();
     merge(prices, ay.brandKey, ay.data, { sourceUrl: ay.sourceUrl, fetchedAt });
@@ -281,12 +238,18 @@ async function updatePrices() {
     sources.push({ brand: "AYTEMIZ", ok: false, error: String(e.message || e) });
   }
 
+  // ❌ Petrol Ofisi (devre dışı)
+  // try { const po = await scrapePetrolOfisi(); ... } catch { ... }
+
+  // ❌ Shell (devre dışı)
+  // try { const sh = await scrapeShell(); ... } catch { ... }
+
   const dataToStore = {
     prices,
     averages: buildAverages(prices),
     sources,
     lastUpdate: fetchedAt,
-    note: "Fiyatlar marka sitelerindeki il bazlı tablolardan otomatik alınır (KV cache).",
+    note: "Fiyatlar Aytemiz il tablosundan alınır (Petrol Ofisi/Shell devre dışı).",
   };
 
   await kvSetJson("fuel:prices", dataToStore);
@@ -313,7 +276,6 @@ async function handlePrices(req, res) {
   let kvData = await kvGetJson("fuel:prices");
   if (!kvData) kvData = await updatePrices();
 
-  // Eskiyse arkada güncelle
   if (hoursSince(kvData?.lastUpdate) > MAX_AGE_HOURS) {
     updatePrices().catch(() => null);
   }
