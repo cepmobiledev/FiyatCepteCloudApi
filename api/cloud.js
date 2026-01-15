@@ -1,7 +1,9 @@
 // api/cloud.js
-// Pompa fiyatları toplayıcı (KV cache + günlük cron için uygun)
+// Canlı pompa fiyatları (KV cache + cron uyumlu)
+// Kaynaklar: Petrol Ofisi (il tablosu) + Aytemiz (il tablosu)
+// Çıktı: prices[BRAND_KEY][CITY_KEY] => { benzin, motorin, lpg, source, fetchedAt }
 
-const MAX_AGE_HOURS = 12; // prices endpoint'i, veri 12 saatten eskiyse update yapar
+const MAX_AGE_HOURS = 12;
 
 ///////////////////////////
 // KV (Upstash/Vercel KV REST)
@@ -19,6 +21,7 @@ async function redisCmd(args) {
       body: JSON.stringify(args),
     });
     if (!response.ok) return { ok: false, result: null, error: `KV HTTP ${response.status}` };
+
     const json = await response.json().catch(() => null);
     if (!json) return { ok: false, result: null, error: "KV bad json" };
     if (json.error) return { ok: false, result: null, error: String(json.error) };
@@ -58,7 +61,7 @@ function normalizeCityKey(input) {
     .replace(/Ş/g, "S")
     .replace(/Ö/g, "O")
     .replace(/Ç/g, "C")
-    .replace(/[^A-Z0-9\s]/g, "")
+    .replace(/[^A-Z0-9\s()/-]/g, "")
     .replace(/\s+/g, "_");
 }
 
@@ -79,6 +82,11 @@ function hoursSince(iso) {
   return (Date.now() - t) / 36e5;
 }
 
+function ensure(obj, k, init) {
+  if (!obj[k]) obj[k] = init;
+  return obj[k];
+}
+
 async function fetchHtml(url) {
   const res = await fetch(url, {
     method: "GET",
@@ -91,79 +99,101 @@ async function fetchHtml(url) {
   return await res.text();
 }
 
-function toBrandCityShape(pricesByCityByBrand) {
-  // input: { BRAND: { CITY: {...} } } zaten bu formatta olacak
-  return pricesByCityByBrand;
+function splitMarkdownRow(rowLine) {
+  return rowLine
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((c) => c.trim());
 }
 
-function ensure(obj, k, init) {
-  if (!obj[k]) obj[k] = init;
-  return obj[k];
+function average2(a, b) {
+  if (typeof a !== "number" || typeof b !== "number") return null;
+  return Number(((a + b) / 2).toFixed(2));
 }
 
 ///////////////////////////
-// Scrapers (Kaynak bazlı)
-// Not: HTML değişirse selector/regex güncellemek gerekebilir. [web:111]
+// Scrapers
 ///////////////////////////
 async function scrapePetrolOfisi() {
-  const url = "https://www.petrolofisi.com.tr/akaryakit-fiyatlari"; // il bazlı tablo içerir [web:23]
+  const url = "https://www.petrolofisi.com.tr/akaryakit-fiyatlari";
   const html = await fetchHtml(url);
 
-  // Basit ve dayanıklı yaklaşım: tabloda geçen şehir + sayı desenlerini satır satır yakalamaya çalış.
-  // Petrol Ofisi sayfasında genelde satırlar: Şehir | Kurşunsuz 95 | Diesel | ... | Otogaz [web:23]
-  // Bu parse "mükemmel" değil ama pratikte işe yarar; tutmadığı yerde log ile görürsün.
+  // Petrol Ofisi sayfasında tablo satırları çoğu ortamda "|" ile markdown gibi görünüyor. [page:1]
+  // Header: | Şehir | V/Max Kurşunsuz 95 | V/Max Diesel | Gazyağı | Kalorifer Yakıtı | Fuel Oil | PO/gaz Otogaz |
+  const lines = String(html).split("\n").map((l) => l.trim());
+
+  const headerIdx = lines.findIndex(
+    (l) =>
+      l.startsWith("| Şehir |") &&
+      l.includes("V/Max Kurşunsuz 95") &&
+      l.includes("V/Max Diesel") &&
+      l.includes("PO/gaz Otogaz")
+  );
+
+  if (headerIdx === -1) {
+    // Fallback: tablo markdown formatında bulunamazsa hata verelim (yanlış parse etmesin)
+    throw new Error("PO table not found (layout changed?)");
+  }
+
+  const startIdx = headerIdx + 2; // header + separator sonrası
+
   const out = {}; // CITY_KEY -> { benzin, motorin, lpg }
+  for (let i = startIdx; i < lines.length; i++) {
+    const row = lines[i];
+    if (!row.startsWith("|")) break;
+    if (row.includes("---")) continue;
 
-  // Şehir adları Türkçe karakterli olabilir; normalize edeceğiz.
-  // Tablo satırları çoğu zaman <tr> içinde; hızlı regex:
-  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let m;
-  while ((m = rowRegex.exec(html)) !== null) {
-    const row = m[1];
-    const cellText = row
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const cols = splitMarkdownRow(row);
+    if (cols.length < 7) continue;
 
-    // "İstanbul 54,xx 56,xx ... 27,xx" gibi
-    // İlk kelime(ler) şehir, sonra 3 sayı yakalamaya çalış.
-    const nums = cellText.match(/(\d{1,3}(?:[.,]\d{1,2})?)/g);
-    if (!nums || nums.length < 2) continue;
-
-    // Şehir adını bulmak için satırın başından ilk sayıya kadar olan kısmı al
-    const firstNum = nums[0];
-    const idx = cellText.indexOf(firstNum);
-    if (idx <= 0) continue;
-
-    const cityRaw = cellText.slice(0, idx).trim();
+    const cityRaw = cols[0];
     const cityKey = normalizeCityKey(cityRaw);
     if (!cityKey) continue;
 
-    const benzin = parseTrNumber(nums[0]);
-    const motorin = parseTrNumber(nums[1]);
+    // Sütunlar (sabit):
+    // 0: Şehir
+    // 1: V/Max Kurşunsuz 95  => benzin
+    // 2: V/Max Diesel        => motorin
+    // 3: Gazyağı
+    // 4: Kalorifer Yakıtı
+    // 5: Fuel Oil
+    // 6: PO/gaz Otogaz       => lpg
+    const benzin = parseTrNumber(cols[1]);
+    const motorin = parseTrNumber(cols[2]);
+    const lpg = parseTrNumber(cols[6]);
 
-    // LPG genelde son sütunlarda; en sondaki sayıyı lpg diye almayı dene
-    const lpg = parseTrNumber(nums[nums.length - 1]);
+    out[cityKey] = {
+      benzin: benzin ?? null,
+      motorin: motorin ?? null,
+      lpg: lpg ?? null,
+    };
+  }
 
-    const rec = {};
-    if (benzin != null) rec.benzin = benzin;
-    if (motorin != null) rec.motorin = motorin;
-    if (lpg != null) rec.lpg = lpg;
-
-    if (Object.keys(rec).length) out[cityKey] = rec;
+  // İstanbul (Avrupa/Anadolu) birleşsin: tek "ISTANBUL" olarak ortalama al. [page:1]
+  const istAvrupa = out["ISTANBUL_(AVRUPA)"];
+  const istAnadolu = out["ISTANBUL_(ANADOLU)"];
+  if (istAvrupa && istAnadolu) {
+    out["ISTANBUL"] = {
+      benzin: average2(istAvrupa.benzin, istAnadolu.benzin),
+      motorin: average2(istAvrupa.motorin, istAnadolu.motorin),
+      lpg: average2(istAvrupa.lpg, istAnadolu.lpg),
+    };
   }
 
   return { brandKey: "PETROL_OFISI", sourceUrl: url, data: out };
 }
 
 async function scrapeAytemiz() {
-  const url = "https://www.aytemiz.com.tr/akaryakit-fiyatlari/benzin-fiyatlari"; // il bazlı tablo [web:35]
+  const url = "https://www.aytemiz.com.tr/akaryakit-fiyatlari/benzin-fiyatlari";
   const html = await fetchHtml(url);
 
-  const out = {}; // CITY_KEY -> { benzin, motorin }
+  // Aytemiz sayfası HTML; çoğu zaman il satırlarında sayılar var. [web:35]
+  const out = {};
   const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let m;
+
   while ((m = rowRegex.exec(html)) !== null) {
     const row = m[1];
     const cellText = row
@@ -186,15 +216,15 @@ async function scrapeAytemiz() {
     const benzin = parseTrNumber(nums[0]);
     const motorin = parseTrNumber(nums[1]);
 
-    if (benzin == null && motorin == null) continue;
-    out[cityKey] = { benzin: benzin ?? null, motorin: motorin ?? null };
+    // Aytemiz sayfasında LPG her zaman bu tabloda olmayabilir; null bırak.
+    out[cityKey] = { benzin: benzin ?? null, motorin: motorin ?? null, lpg: null };
   }
 
   return { brandKey: "AYTEMIZ", sourceUrl: url, data: out };
 }
 
 ///////////////////////////
-// Build + Cache
+// Build / Cache
 ///////////////////////////
 function merge(prices, brandKey, cityMap, meta) {
   const byBrand = ensure(prices, brandKey, {});
@@ -210,7 +240,7 @@ function merge(prices, brandKey, cityMap, meta) {
 }
 
 function buildAverages(prices) {
-  const sums = {}; // CITY -> sums
+  const sums = {};
   for (const brandKey of Object.keys(prices || {})) {
     for (const [cityKey, p] of Object.entries(prices[brandKey] || {})) {
       const s = ensure(sums, cityKey, { bS: 0, bN: 0, mS: 0, mN: 0, lS: 0, lN: 0 });
@@ -235,7 +265,6 @@ async function updatePrices() {
   const prices = {};
   const sources = [];
 
-  // Petrol Ofisi
   try {
     const po = await scrapePetrolOfisi();
     merge(prices, po.brandKey, po.data, { sourceUrl: po.sourceUrl, fetchedAt });
@@ -244,7 +273,6 @@ async function updatePrices() {
     sources.push({ brand: "PETROL_OFISI", ok: false, error: String(e.message || e) });
   }
 
-  // Aytemiz
   try {
     const ay = await scrapeAytemiz();
     merge(prices, ay.brandKey, ay.data, { sourceUrl: ay.sourceUrl, fetchedAt });
@@ -254,7 +282,7 @@ async function updatePrices() {
   }
 
   const dataToStore = {
-    prices: toBrandCityShape(prices),
+    prices,
     averages: buildAverages(prices),
     sources,
     lastUpdate: fetchedAt,
@@ -283,11 +311,9 @@ async function handleHealth(_req, res) {
 
 async function handlePrices(req, res) {
   let kvData = await kvGetJson("fuel:prices");
-
-  // Yoksa oluştur
   if (!kvData) kvData = await updatePrices();
 
-  // Eskiyse arka planda güncelle (response'u bekletmeden)
+  // Eskiyse arkada güncelle
   if (hoursSince(kvData?.lastUpdate) > MAX_AGE_HOURS) {
     updatePrices().catch(() => null);
   }
@@ -298,9 +324,7 @@ async function handlePrices(req, res) {
   const cityKey = cityParam ? normalizeCityKey(cityParam) : null;
   const brandKey = brandParam ? normalizeCityKey(brandParam) : null;
 
-  if (!cityKey && !brandKey) {
-    return res.status(200).json(kvData);
-  }
+  if (!cityKey && !brandKey) return res.status(200).json(kvData);
 
   if (brandKey && !cityKey) {
     return res.status(200).json({
